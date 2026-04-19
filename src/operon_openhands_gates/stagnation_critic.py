@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 from openhands.sdk.critic.base import CriticBase
 from openhands.sdk.critic.result import CriticResult
-from operon_ai.core.certificate import Certificate
+from operon_ai.core.certificate import Certificate, register_verify_fn
 from operon_ai.health.epiplexity import EpiplexityMonitor
 from pydantic import ConfigDict, Field, PrivateAttr
 
@@ -233,7 +233,7 @@ def _emit_certificate(
         }
     )
     return Certificate(
-        theorem="behavioral_stability",
+        theorem=_WINDOWED_THEOREM,
         parameters=params,
         conclusion=(
             f"Stagnation detected after {detection_index} measurements; "
@@ -321,3 +321,20 @@ def _is_agent(event: Any) -> bool:
     # ``MessageEvent.source`` is a ``SourceType`` enum-like — compare by string
     # to stay tolerant across SDK versions that may change the literal.
     return str(getattr(event, "source", "")).lower().endswith("agent")
+
+
+# A theorem name unique to the windowed verifier. Reusing the shared
+# ``behavioral_stability`` name would cause deserialized certificates to
+# be re-verified with the core's flat-mean ``_verify_behavioral_stability``
+# (via ``_THEOREM_FN_PATHS`` lookup), silently reintroducing the exact
+# flat-mean semantics this package is replacing. Registering a distinct
+# theorem keeps in-memory and round-tripped certs in sync.
+_WINDOWED_THEOREM = "behavioral_stability_windowed"
+
+
+# Register once at import time. ``_resolve_verify_fn`` checks
+# ``_VERIFY_REGISTRY`` before ``_THEOREM_FN_PATHS``, so this takes
+# precedence for the windowed theorem while leaving the legacy
+# ``behavioral_stability`` name resolving to the core's flat-mean
+# verifier as before.
+register_verify_fn(_WINDOWED_THEOREM, _verify_window_max_stability)

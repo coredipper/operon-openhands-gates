@@ -68,7 +68,7 @@ def test_stagnation_detected_on_identical_outputs() -> None:
         critic.evaluate([_agent_msg("same response every turn")])
     assert critic.is_stagnant is True
     assert critic.certificate is not None
-    assert critic.certificate.theorem == "behavioral_stability"
+    assert critic.certificate.theorem == "behavioral_stability_windowed"
 
 
 def test_no_stagnation_on_diverse_outputs() -> None:
@@ -86,7 +86,7 @@ def test_metadata_includes_certificate_theorem_once_fired() -> None:
         last = critic.evaluate([_agent_msg("loop loop loop")])
     assert last is not None
     assert last.metadata is not None
-    assert last.metadata.get("certificate_theorem") == "behavioral_stability"
+    assert last.metadata.get("certificate_theorem") == "behavioral_stability_windowed"
     assert last.metadata.get("certificate_source") == (
         "operon_openhands_gates.stagnation_critic"
     )
@@ -368,3 +368,27 @@ def test_extract_text_handles_plain_string_from_content_to_str(
     # Bypass the module-level import cache by reaching the function directly.
     text = module._extract_last_agent_text([_agent_msg("placeholder")])
     assert text == "hello world"
+
+
+def test_windowed_theorem_is_registered_for_round_trip_verify() -> None:
+    """Sibling-sync regression: the custom verifier must be registered
+    against a unique theorem name so that a deserialized certificate
+    resolves back to our verifier rather than silently falling back to
+    the core's flat-mean ``_verify_behavioral_stability`` (which is what's
+    registered for the shared ``behavioral_stability`` theorem name).
+    """
+    from operon_ai.core.certificate import (
+        _resolve_verify_fn,
+        _verify_behavioral_stability,
+    )
+
+    from operon_openhands_gates.stagnation_critic import (
+        _verify_window_max_stability,
+    )
+
+    resolved = _resolve_verify_fn("behavioral_stability_windowed")
+    assert resolved is _verify_window_max_stability
+
+    # The shared name still resolves to the core's flat-mean verifier —
+    # we didn't clobber it.
+    assert _resolve_verify_fn("behavioral_stability") is _verify_behavioral_stability
