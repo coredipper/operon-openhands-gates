@@ -87,9 +87,7 @@ def test_metadata_includes_certificate_theorem_once_fired() -> None:
     assert last is not None
     assert last.metadata is not None
     assert last.metadata.get("certificate_theorem") == "behavioral_stability_windowed"
-    assert last.metadata.get("certificate_source") == (
-        "operon_openhands_gates.stagnation_critic"
-    )
+    assert last.metadata.get("certificate_source") == ("operon_openhands_gates.stagnation_critic")
 
 
 def test_certificate_captures_replayable_instability_evidence() -> None:
@@ -385,9 +383,7 @@ def test_extract_text_handles_plain_string_from_content_to_str(
     """
     from operon_openhands_gates import stagnation_critic as module
 
-    monkeypatch.setattr(
-        "openhands.sdk.llm.content_to_str", lambda contents: "hello world"
-    )
+    monkeypatch.setattr("openhands.sdk.llm.content_to_str", lambda contents: "hello world")
 
     # Bypass the module-level import cache by reaching the function directly.
     text = module._extract_last_agent_text([_agent_msg("placeholder")])
@@ -511,7 +507,7 @@ def test_windowed_theorem_resolves_without_this_package_imported(tmp_path) -> No
         "must not depend on it'\n"
         ")\n"
         "print('ok')\n",
-        encoding='utf-8',
+        encoding="utf-8",
     )
     result = subprocess.run(
         [sys.executable, str(probe)],
