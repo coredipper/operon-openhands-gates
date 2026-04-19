@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 from openhands.sdk.critic.base import CriticBase
 from openhands.sdk.critic.result import CriticResult
-from operon_ai.core.certificate import Certificate, _verify_behavioral_stability_windowed
+from operon_ai.core.certificate import Certificate, _resolve_verify_fn
 from operon_ai.health.epiplexity import EpiplexityMonitor
 from pydantic import ConfigDict, Field, PrivateAttr
 
@@ -226,6 +226,18 @@ def _emit_certificate(
             "window_severity_means must be non-empty; "
             "a stagnation certificate requires at least one violating window"
         )
+    # Resolve the verifier indirectly via operon_ai's theorem registry
+    # rather than importing the underscore-prefixed function by name.
+    # This keeps the dependency at the level of the theorem contract —
+    # ``behavioral_stability_windowed`` resolves to a verify function —
+    # rather than binding to a specific internal symbol that operon_ai
+    # may rename or relocate in a future release.
+    verify_fn = _resolve_verify_fn(_WINDOWED_THEOREM)
+    if verify_fn is None:
+        raise RuntimeError(
+            f"theorem {_WINDOWED_THEOREM!r} is not registered; "
+            f"operon-ai>=0.36.0 is required"
+        )
     params = MappingProxyType(
         {
             "signal_values": tuple(window_severity_means),
@@ -241,7 +253,7 @@ def _emit_certificate(
             f"captured for replay verification."
         ),
         source="operon_openhands_gates.stagnation_critic",
-        _verify_fn=_verify_behavioral_stability_windowed,
+        _verify_fn=verify_fn,
     )
 
 
