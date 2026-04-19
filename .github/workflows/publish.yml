@@ -16,12 +16,18 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v5
+      # Actions pinned to full commit SHAs (not mutable tags) so a
+      # supply-chain compromise of a moving ref cannot publish a poisoned
+      # wheel to PyPI under this project's OIDC identity. Comments name
+      # the upgrade target used at pin time — refresh deliberately.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        # Matches the declared runtime floor in pyproject.toml
+        # (``requires-python = ">=3.12"``). Keep in sync when bumping.
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install build dependencies
         run: |
@@ -32,4 +38,4 @@ jobs:
         run: python -m build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1 (2025-11-17)

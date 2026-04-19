@@ -15,10 +15,14 @@ jobs:
         python-version: ["3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v5
+      # Actions pinned to full commit SHAs (not mutable tags) so a
+      # supply-chain compromise of a moving ref cannot silently execute
+      # untrusted code in this workflow. Comments name the upgrade
+      # target used at pin time — refresh deliberately.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -27,6 +31,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          pip install build
 
       - name: Lint (ruff)
         run: ruff check src tests
@@ -39,3 +44,9 @@ jobs:
 
       - name: Test (pytest)
         run: pytest -v
+
+      - name: Build package (wheel + sdist)
+        # Run the same build invocation the publish workflow uses, so
+        # packaging/metadata regressions surface on PRs rather than at
+        # release time.
+        run: python -m build
