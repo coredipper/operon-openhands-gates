@@ -56,7 +56,20 @@ OpenHands' default `success_threshold=0.6` is tuned for LLM probability-of-succe
 
 ## Sibling package
 
-- [`operon-langgraph-gates`](https://github.com/coredipper/operon-langgraph-gates) — same Paper 4 substrate, same `behavioral_stability` certificate, targeted at LangGraph's `StateGraph` with `.wrap()` / `.edge()` node APIs. Two packages, one core — this is the framework-portability claim from Paper 5 §3 in code.
+- [`operon-langgraph-gates`](https://github.com/coredipper/operon-langgraph-gates) — same Paper 4 substrate, same `behavioral_stability_windowed` certificate, targeted at LangGraph's `StateGraph` with `.wrap()` / `.edge()` node APIs. Two packages, one core — this is the framework-portability claim from Paper 5 §3 in code.
+
+## Certificate theorem name and verification
+
+Certificates emitted by this package carry the theorem name `behavioral_stability_windowed` (not the core's shared `behavioral_stability`). The two differ in how they verify:
+
+- `behavioral_stability` (shared core): `mean(severities) < threshold`. Loses the per-window structure that rolling-integral detection operates on.
+- `behavioral_stability_windowed` (shared core, since operon-ai 0.36.0): `max(per_window_severity_means) <= stability_threshold`. Mirrors detection exactly.
+
+Both verifiers are registered in `operon_ai.core.certificate._THEOREM_FN_PATHS`, so deserialized certificates resolve through `_resolve_verify_fn` without this package needing to be imported. Any consumer with `operon-ai>=0.36.0` can round-trip a `behavioral_stability_windowed` certificate correctly.
+
+### Breaking change from pre-alpha prototypes
+
+Earlier pre-release builds emitted certificates with theorem name `behavioral_stability` (the shared core name), bound to a locally-attached `_verify_fn`. That shape was semantically wrong — the shared verifier is flat-mean-based, so any cert round-tripped through serialization would silently revert to the wrong replay logic. Consumers that key on `certificate.theorem == "behavioral_stability"` or `metadata["certificate_theorem"] == "behavioral_stability"` must update to `"behavioral_stability_windowed"`. No migration path is provided; alpha.
 
 ## Citations
 

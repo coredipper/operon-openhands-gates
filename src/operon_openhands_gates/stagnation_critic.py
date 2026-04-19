@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 from openhands.sdk.critic.base import CriticBase
 from openhands.sdk.critic.result import CriticResult
-from operon_ai.core.certificate import Certificate, _verify_behavioral_stability
+from operon_ai.core.certificate import Certificate
 from operon_ai.health.epiplexity import EpiplexityMonitor
 from pydantic import ConfigDict, Field, PrivateAttr
 
@@ -120,7 +120,7 @@ class OperonStagnationCritic(CriticBase):
 
     def evaluate(
         self,
-        events: Sequence["LLMConvertibleEvent"],
+        events: Sequence[LLMConvertibleEvent],
         git_patch: str | None = None,
     ) -> CriticResult:
         text = _extract_last_agent_text(events)
@@ -145,12 +145,42 @@ class OperonStagnationCritic(CriticBase):
             self._low_integral_streak = 0
 
         was_stagnant = self._is_stagnant
-        self._is_stagnant = self._low_integral_streak >= self.critical_duration
+        should_be_stagnant = self._low_integral_streak >= self.critical_duration
 
-        if self._is_stagnant and not was_stagnant:
+        if should_be_stagnant and not was_stagnant:
+            # Evidence = the exact aggregates detection operates on.
+            # Stagnation fires when each of the last ``critical_duration``
+            # rolling-window integrals is below the detection threshold.
+            # Flattening those overlapping windows into a single mean loses
+            # the per-window predicate: under ``window=2, cd=2`` with
+            # severities ``[0.61, 1.0, 0.61]``, both window means are
+            # ``0.805`` (detection fires against stability threshold
+            # ``0.8``), but the flattened mean is only ``0.74`` (replay
+            # would say stability held). Store the per-window severity
+            # means themselves — one per violating window — and verify
+            # with a max-based check (``max(window_means) < threshold``)
+            # that mirrors detection's "every window violates" semantic.
+            violating_integrals = self._integrals[-self.critical_duration :]
+            window_severity_means = tuple(1.0 - i for i in violating_integrals)
+            # Threshold-domain translation: detection fires on
+            # ``integral < self.threshold`` ⟺ ``window_mean_severity > 1 - self.threshold``.
+            # Store the stability threshold ``1 - self.threshold`` so the
+            # verifier's ``max < stored_threshold`` matches detection at
+            # every threshold value in [0, 1], not just <= 0.5.
+            #
+            # Emit the certificate *before* flipping ``_is_stagnant`` so a
+            # failure (e.g. unregistered theorem) leaves the critic in its
+            # prior non-stagnant state and a later ``evaluate()`` call can
+            # retry emission once the underlying problem is corrected. If
+            # we flipped state first, the ``was_stagnant/not was_stagnant``
+            # guard below would suppress retry and the critic would be
+            # permanently stuck in ``is_stagnant=True / certificate=None``.
             self._certificate = _emit_certificate(
-                severities=self._severities, threshold=self.threshold
+                window_severity_means=window_severity_means,
+                threshold=1.0 - self.threshold,
+                detection_index=len(self._severities),
             )
+        self._is_stagnant = should_be_stagnant
 
         status = "STAGNANT" if self._is_stagnant else "healthy"
         metadata: dict[str, Any] = {"severity": severity}
@@ -176,26 +206,53 @@ class OperonStagnationCritic(CriticBase):
         return self._is_stagnant
 
 
-def _emit_certificate(*, severities: list[float], threshold: float) -> Certificate:
-    params = MappingProxyType(
-        {
-            "signal_values": tuple(severities),
-            "threshold": float(threshold),
-        }
-    )
-    return Certificate(
-        theorem="behavioral_stability",
-        parameters=params,
+def _emit_certificate(
+    *,
+    window_severity_means: tuple[float, ...],
+    threshold: float,
+    detection_index: int,
+) -> Certificate:
+    """Emit a ``behavioral_stability`` certificate backed by per-window means.
+
+    ``signal_values`` is the sequence of mean severities over each violating
+    rolling window — one value per window, ``critical_duration`` values
+    total. The replay check is ``max(signal_values) < threshold``, which
+    mirrors detection's "every one of the last ``critical_duration``
+    rolling windows was violating" predicate.
+
+    ``detection_index`` is the total number of evaluations the critic had
+    performed when stagnation was detected, used only in the human-readable
+    conclusion text. Pass ``len(self._severities)`` at emit time — after a
+    long healthy prefix, this is much larger than the evidence-slice length
+    and keeps the conclusion accurate.
+
+    ``window_severity_means`` must be non-empty. A stagnation certificate
+    without evidence is a contradiction in terms, so emitting one is a
+    programmer error rather than a runtime condition to tolerate.
+    """
+    if not window_severity_means:
+        raise ValueError(
+            "window_severity_means must be non-empty; "
+            "a stagnation certificate requires at least one violating window"
+        )
+    return Certificate.from_theorem(
+        theorem=_WINDOWED_THEOREM,
+        parameters=MappingProxyType(
+            {
+                "signal_values": tuple(window_severity_means),
+                "threshold": float(threshold),
+            }
+        ),
         conclusion=(
-            f"Stagnation detected after {len(severities)} measurements; "
-            f"severity evidence captured for replay verification."
+            f"Stagnation detected after {detection_index} measurements; "
+            f"{len(window_severity_means)} violating rolling windows "
+            f"captured for replay verification."
         ),
         source="operon_openhands_gates.stagnation_critic",
-        _verify_fn=_verify_behavioral_stability,
     )
 
 
-def _extract_last_agent_text(events: Sequence["LLMConvertibleEvent"]) -> str:
+def _extract_last_agent_text(events: Sequence[LLMConvertibleEvent]) -> str:
     """Extract text from the most recent agent-sourced event.
 
     Walks events in reverse. Prefers ``MessageEvent`` from the agent;
@@ -214,7 +271,15 @@ def _extract_last_agent_text(events: Sequence["LLMConvertibleEvent"]) -> str:
                 parts = content_to_str(event.llm_message.content)
             except Exception:
                 parts = []
-            joined = " ".join(p for p in parts if p).strip()
+            # ``content_to_str`` in ``openhands-sdk==1.17`` returns ``list[str]``
+            # (see openhands-sdk/openhands/sdk/llm/message.py:697). Branch
+            # defensively in case a future SDK version returns a plain string
+            # — iterating a string would join characters with spaces and
+            # corrupt the monitor's input.
+            if isinstance(parts, str):
+                joined = parts.strip()
+            else:
+                joined = " ".join(p for p in parts if p).strip()
             if joined:
                 return joined
     return ""
@@ -224,3 +289,11 @@ def _is_agent(event: Any) -> bool:
     # ``MessageEvent.source`` is a ``SourceType`` enum-like — compare by string
     # to stay tolerant across SDK versions that may change the literal.
     return str(getattr(event, "source", "")).lower().endswith("agent")
+
+
+# A theorem name distinct from the shared ``behavioral_stability`` (which is
+# flat-mean-based). Upstream ``operon_ai.core.certificate`` registers this
+# theorem in its theorem registry, so ``Certificate.from_theorem`` resolves
+# the correct verifier without this package binding to any upstream symbol
+# beyond the public ``Certificate`` class itself (operon-ai>=0.36.1).
+_WINDOWED_THEOREM = "behavioral_stability_windowed"
