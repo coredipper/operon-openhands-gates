@@ -239,22 +239,30 @@ def _emit_certificate(
 def _verify_window_max_stability(
     params: Mapping[str, Any],
 ) -> tuple[bool, dict[str, Any]]:
-    """Replay: every violating rolling window must have mean severity above
-    the stability threshold. Stable ⟺ ``max(window_means) < threshold``.
+    """Replay: every window's mean severity is within the stability bound.
 
-    This mirrors the detection predicate directly. Using ``mean < threshold``
-    (as ``operon_ai.core.certificate._verify_behavioral_stability`` does)
-    loses the per-window structure: overlapping windows weight interior
-    samples more than a flattened mean does, so a flattened-mean replay can
-    say stability held even when every rolling window was violating.
+    Stable ⟺ ``max(window_means) <= threshold``. The ``<=`` (not ``<``)
+    mirrors detection's strict ``integral < threshold`` predicate exactly:
+    detection says "stagnant iff integral < τ_d", so "stable iff
+    integral >= τ_d". In the severity domain this becomes "stable iff
+    mean(severity) <= 1 - τ_d = τ_s", which is an inclusive upper bound.
+    A strict ``<`` here would misclassify the equality boundary as
+    unstable — the detector treats it as stable.
+
+    This mirrors the detection aggregate directly. Using a flat
+    ``mean < threshold`` check (as ``operon_ai.core.certificate._verify_behavioral_stability``
+    does) loses the per-window structure: overlapping windows weight
+    interior samples more heavily than a flat mean does, so a flat-mean
+    replay can say stability held even when every rolling window was
+    violating.
     """
     values = list(params["signal_values"])
     threshold = params["threshold"]
     if not values:
-        return False, {"max": 0.0, "mean": 0.0, "n": 0}
+        return True, {"max": 0.0, "mean": 0.0, "n": 0}
     max_v = max(values)
     mean_v = sum(values) / len(values)
-    return max_v < threshold, {
+    return max_v <= threshold, {
         "max": round(max_v, 4),
         "mean": round(mean_v, 4),
         "n": len(values),

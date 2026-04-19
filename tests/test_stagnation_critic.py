@@ -183,6 +183,43 @@ def test_certificate_evidence_is_per_window_severity_means() -> None:
     assert verification.evidence["max"] >= 1.0 - critic.threshold
 
 
+def test_certificate_verify_treats_threshold_equality_as_stable() -> None:
+    """Regression for roborev job 766 (Low).
+
+    Detection uses a strict ``integral < threshold`` predicate, so a
+    window with ``integral == threshold`` is NOT stagnant (stable). The
+    severity-domain complement is ``mean(severity) <= 1 - threshold``,
+    which is inclusive at the boundary. A strict ``<`` in the verifier
+    misclassifies the boundary as unstable.
+    """
+    from operon_openhands_gates.stagnation_critic import _emit_certificate
+
+    # Window mean exactly at the stability threshold: detection would say
+    # stable (integral >= detection threshold), so verify must agree.
+    cert_boundary = _emit_certificate(
+        window_severity_means=(0.8,),
+        threshold=0.8,
+        detection_index=1,
+    )
+    assert cert_boundary.verify().holds is True
+
+    # Just below threshold: clearly stable.
+    cert_stable = _emit_certificate(
+        window_severity_means=(0.799,),
+        threshold=0.8,
+        detection_index=1,
+    )
+    assert cert_stable.verify().holds is True
+
+    # Just above threshold: clearly unstable (detection fires).
+    cert_unstable = _emit_certificate(
+        window_severity_means=(0.801,),
+        threshold=0.8,
+        detection_index=1,
+    )
+    assert cert_unstable.verify().holds is False
+
+
 def test_certificate_handles_overlapping_windows_counterexample() -> None:
     """Regression for roborev job 764 High (reviewer's counterexample).
 
