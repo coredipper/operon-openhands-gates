@@ -294,26 +294,39 @@ def test_certificate_handles_overlapping_windows_counterexample() -> None:
     assert stable_cert.verify().holds is True
 
 
-def test_certificate_conclusion_uses_total_detection_index_not_slice_length() -> None:
-    """Regression for roborev job 765 (Low).
+def test_certificate_conclusion_uses_exact_detection_index() -> None:
+    """Regression for roborev jobs 765 Low and 773 Low (sibling-sync).
 
-    After a long healthy prefix, the cert's human-readable conclusion
-    must report the actual measurement count at detection time, not the
-    length of the evidence slice. Previously the conclusion said
-    ``"after N measurements"`` with N = len(severities[-(window + cd - 1):])
-    which under-reports when the true detection index is much larger.
+    The conclusion text must quote the exact evaluation count at
+    detection — pinning it to the turn the cert first appears, not a
+    hard-coded value or a bounds check. A regression to reporting some
+    other count (evidence-slice length, final loop count, etc.) would
+    fail on the exact-equality assertion.
     """
+    import re
+
     critic = OperonStagnationCritic(threshold=0.2, critical_duration=1, window=20)
-    for _ in range(25):
+
+    emission_turn: int | None = None
+    for turn in range(1, 40):
         critic.evaluate([_agent_msg("identical saturating text")])
+        if critic.certificate is not None and emission_turn is None:
+            emission_turn = turn
+            break
+
+    assert emission_turn is not None, "expected a certificate within 40 turns"
     assert critic.certificate is not None
 
-    # The conclusion text must quote the total evaluation count (~21)
-    # not the evidence-slice length (== window).
     conclusion = critic.certificate.conclusion
-    # First violating integral arrives once the window is filled, so the
-    # detection index is at least ``window`` (> critical_duration).
-    assert "after 21 measurements" in conclusion or "after 20 measurements" in conclusion
+    match = re.search(r"after (\d+) measurements", conclusion)
+    assert match is not None, f"conclusion lacks measurement count: {conclusion!r}"
+    reported_n = int(match.group(1))
+
+    # One evaluate() call produces one monitor measurement, so the
+    # reported N equals the turn count at which the cert fired.
+    assert reported_n == emission_turn, (
+        f"conclusion reports N={reported_n} but emission turn was {emission_turn}"
+    )
 
 
 def test_certificate_replay_agrees_with_detection_for_threshold_above_half() -> None:
