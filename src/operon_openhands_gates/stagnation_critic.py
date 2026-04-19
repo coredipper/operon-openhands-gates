@@ -216,7 +216,16 @@ def _emit_certificate(
     conclusion text. Pass ``len(self._severities)`` at emit time — after a
     long healthy prefix, this is much larger than the evidence-slice length
     and keeps the conclusion accurate.
+
+    ``window_severity_means`` must be non-empty. A stagnation certificate
+    without evidence is a contradiction in terms, so emitting one is a
+    programmer error rather than a runtime condition to tolerate.
     """
+    if not window_severity_means:
+        raise ValueError(
+            "window_severity_means must be non-empty; "
+            "a stagnation certificate requires at least one violating window"
+        )
     params = MappingProxyType(
         {
             "signal_values": tuple(window_severity_means),
@@ -258,8 +267,14 @@ def _verify_window_max_stability(
     """
     values = list(params["signal_values"])
     threshold = params["threshold"]
+    # Every emitted stagnation certificate has at least one violating
+    # window by construction (``critical_duration >= 1`` is enforced by
+    # the Pydantic validator on the critic). An empty ``signal_values``
+    # therefore signals a malformed or externally-constructed certificate,
+    # not vacuous stability — reject it outright instead of silently
+    # attesting that stability held.
     if not values:
-        return True, {"max": 0.0, "mean": 0.0, "n": 0}
+        return False, {"max": 0.0, "mean": 0.0, "n": 0, "reason": "empty_evidence"}
     max_v = max(values)
     mean_v = sum(values) / len(values)
     return max_v <= threshold, {

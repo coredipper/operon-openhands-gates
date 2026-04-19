@@ -183,6 +183,40 @@ def test_certificate_evidence_is_per_window_severity_means() -> None:
     assert verification.evidence["max"] >= 1.0 - critic.threshold
 
 
+def test_empty_evidence_is_rejected_not_vacuously_stable() -> None:
+    """Regression for roborev job 767 (Low).
+
+    The critic's Pydantic validator enforces ``critical_duration >= 1``,
+    so every legitimately-emitted certificate carries at least one
+    violating window. Empty ``signal_values`` can therefore only come
+    from a malformed or externally-constructed certificate — treating
+    that as vacuous stability would turn a broken cert into a silent
+    "stability held" attestation. Two layers of defense: the emitter
+    raises, and the verifier rejects.
+    """
+    from operon_openhands_gates.stagnation_critic import (
+        _emit_certificate,
+        _verify_window_max_stability,
+    )
+
+    # Emission-time guard: can't produce an empty cert in the first place.
+    with pytest.raises(ValueError, match="non-empty"):
+        _emit_certificate(
+            window_severity_means=(),
+            threshold=0.8,
+            detection_index=42,
+        )
+
+    # Verifier-time guard: an externally-constructed empty cert fails
+    # replay rather than silently attesting stability.
+    holds, evidence = _verify_window_max_stability(
+        {"signal_values": (), "threshold": 0.8}
+    )
+    assert holds is False
+    assert evidence["reason"] == "empty_evidence"
+    assert evidence["n"] == 0
+
+
 def test_certificate_verify_treats_threshold_equality_as_stable() -> None:
     """Regression for roborev job 766 (Low).
 
