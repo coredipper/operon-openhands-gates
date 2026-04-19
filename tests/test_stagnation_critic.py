@@ -160,35 +160,63 @@ def test_certificate_evidence_reflects_detection_window_not_full_history() -> No
 def test_certificate_evidence_spans_violating_integral_windows() -> None:
     """Regression for roborev jobs 761 & 762 (High).
 
-    Previous fix used the last ``critical_duration`` point severities as
-    certificate evidence. That loses correspondence with detection when
-    ``window`` >> ``critical_duration``: old stagnant samples can keep the
-    integral low while the most recent point severities are healthy,
-    producing ``verify().holds=True`` even though the critic is stagnant.
+    Certificate evidence must span the samples that backed the violating
+    integrals — last ``window + critical_duration - 1`` severities — not
+    just the latest point severities. Under ``critical_duration=1`` with
+    a large window, the previous narrow-fix would give
+    ``len(signal_values) == 1``; the correct fix gives
+    ``len(signal_values) == window``.
 
-    Construct that scenario: a long stagnant prefix followed by a short
-    healthy suffix, with ``critical_duration=1`` and a window large
-    enough that the first integral after the stagnant prefix is still
-    below threshold. Certificate replay must still return
-    ``holds=False`` — evidence must come from the windows that backed
-    the violating integrals, not just the latest severities.
+    The assertion on ``signal_values`` length is the load-bearing
+    discriminator: it distinguishes the correct fix from the earlier
+    broken ``severities[-critical_duration:]`` fix regardless of whether
+    ``holds`` happens to agree between the two in this input sequence.
     """
-    # Window large relative to critical_duration so old low-novelty samples
-    # can keep the integral below threshold while newer samples are healthy.
     critic = OperonStagnationCritic(threshold=0.2, critical_duration=1, window=20)
-
-    # Long stagnant prefix: identical text saturates novelty near zero.
     for _ in range(25):
         critic.evaluate([_agent_msg("identical saturating text")])
     assert critic.is_stagnant is True
     assert critic.certificate is not None
 
+    # Load-bearing discriminator: under the earlier broken fix,
+    # len(signal_values) would be critical_duration (= 1), not
+    # window + critical_duration - 1 (= 20).
+    signal_values = critic.certificate.parameters["signal_values"]
+    assert len(signal_values) == critic.window + critic.critical_duration - 1
+
     verification = critic.certificate.verify()
     assert verification.holds is False
-    # Evidence must span the full window that backed the violating
-    # integral — not just the last ``critical_duration`` severity.
-    assert verification.evidence["n"] > critic.critical_duration
     assert verification.evidence["n"] == critic.window + critic.critical_duration - 1
+
+
+def test_certificate_replay_agrees_with_detection_for_threshold_above_half() -> None:
+    """Regression for roborev job 763 (Medium).
+
+    Detection compares epiplexic integrals to threshold directly
+    (integral < threshold), while the ``behavioral_stability`` replay
+    checks mean(severity) < threshold. These are equivalent only when
+    threshold <= 0.5 — for threshold > 0.5, a violating integral only
+    guarantees mean(severity) > 1 - threshold, not > threshold, so a
+    literal-threshold cert can say ``holds=True`` while the critic has
+    flipped stagnant.
+
+    The fix is to store ``1 - threshold`` (the stability threshold) in
+    the certificate parameters, so verify's ``< threshold`` semantic
+    matches detection at every threshold value.
+    """
+    # Threshold clearly above 0.5: previously a gap configuration.
+    critic = OperonStagnationCritic(threshold=0.7, critical_duration=1, window=5)
+    for _ in range(10):
+        critic.evaluate([_agent_msg("identical saturating text")])
+    assert critic.is_stagnant is True
+    assert critic.certificate is not None
+
+    # The cert must store the translated (stability) threshold, not the
+    # detection threshold.
+    assert critic.certificate.parameters["threshold"] == 1.0 - critic.threshold
+
+    verification = critic.certificate.verify()
+    assert verification.holds is False
 
 
 def test_extract_text_handles_plain_string_from_content_to_str(

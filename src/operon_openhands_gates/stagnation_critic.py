@@ -148,22 +148,27 @@ class OperonStagnationCritic(CriticBase):
         self._is_stagnant = self._low_integral_streak >= self.critical_duration
 
         if self._is_stagnant and not was_stagnant:
-            # Emit the certificate from the exact samples that backed the
-            # violating integrals — a rolling window of ``window_size``
-            # epiplexity values produces each integral, and ``critical_duration``
-            # consecutive violating integrals are required to fire, so the
-            # union of samples that fed any violating integral is the last
-            # ``window + critical_duration - 1`` severities. Anything
-            # narrower (e.g. just the last ``critical_duration`` point
-            # severities) loses correspondence with detection when
-            # ``window`` >> ``critical_duration``: old stagnant samples
-            # keep the integral low while recent severities are healthy,
-            # which can flip ``verify().holds`` to True even though the
-            # critic just went stagnant.
+            # Evidence = the exact samples that backed the violating integrals.
+            # Each integral is a rolling mean over ``window_size`` epiplexity
+            # values; detection needs ``critical_duration`` consecutive
+            # violating integrals, so the union of samples feeding any
+            # violating integral is the last ``window + critical_duration - 1``
+            # severities. Anything narrower loses correspondence with
+            # detection when ``window`` >> ``critical_duration``.
             evidence_n = self.window + self.critical_duration - 1
             window_severities = self._severities[-evidence_n:]
+            # Threshold-domain translation: detection fires on
+            # ``mean(epiplexity) < self.threshold``, which implies
+            # ``mean(severity) > 1 - self.threshold``. ``_verify_behavioral_stability``
+            # checks ``mean(signal) < threshold`` for stability to hold. To make
+            # verify semantics agree with detection at all threshold values
+            # (not just <= 0.5), store the translated stability threshold
+            # ``1 - self.threshold`` in the certificate parameters. The user-
+            # facing detection threshold stays untouched; only the cert payload
+            # sees the complement.
             self._certificate = _emit_certificate(
-                severities=window_severities, threshold=self.threshold
+                severities=window_severities,
+                threshold=1.0 - self.threshold,
             )
 
         status = "STAGNANT" if self._is_stagnant else "healthy"
