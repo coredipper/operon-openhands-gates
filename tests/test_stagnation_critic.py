@@ -194,7 +194,7 @@ def test_empty_evidence_is_rejected_not_vacuously_stable() -> None:
     "stability held" attestation. Two layers of defense: the emitter
     raises, and the verifier rejects.
     """
-    from operon_ai.core.certificate import _verify_behavioral_stability_windowed
+    from operon_ai.core.certificate import resolve_verify_fn
 
     from operon_openhands_gates.stagnation_critic import _emit_certificate
 
@@ -208,9 +208,9 @@ def test_empty_evidence_is_rejected_not_vacuously_stable() -> None:
 
     # Verifier-time guard: an externally-constructed empty cert fails
     # replay rather than silently attesting stability.
-    holds, evidence = _verify_behavioral_stability_windowed(
-        {"signal_values": (), "threshold": 0.8}
-    )
+    verify_fn = resolve_verify_fn("behavioral_stability_windowed")
+    assert verify_fn is not None
+    holds, evidence = verify_fn({"signal_values": (), "threshold": 0.8})
     assert holds is False
     assert evidence["reason"] == "empty_evidence"
     assert evidence["n"] == 0
@@ -397,15 +397,14 @@ def test_extract_text_handles_plain_string_from_content_to_str(
 
 def test_windowed_theorem_resolves_through_upstream_registry() -> None:
     """Same-process contract: windowed theorem resolves to a callable,
-    distinct from the legacy theorem's callable. No hard-coded identity
-    check against a private operon-ai symbol — a future refactor that
-    renames the implementation but keeps the theorem contract stable
-    should not break this test.
+    distinct from the legacy theorem's callable. Uses the public
+    ``resolve_verify_fn`` API (operon-ai>=0.36.1); no coupling to any
+    underscore-prefixed upstream symbol.
     """
-    from operon_ai.core.certificate import _resolve_verify_fn
+    from operon_ai.core.certificate import resolve_verify_fn
 
-    windowed = _resolve_verify_fn("behavioral_stability_windowed")
-    legacy = _resolve_verify_fn("behavioral_stability")
+    windowed = resolve_verify_fn("behavioral_stability_windowed")
+    legacy = resolve_verify_fn("behavioral_stability")
 
     assert windowed is not None and callable(windowed)
     assert legacy is not None and callable(legacy)
