@@ -120,7 +120,7 @@ class OperonStagnationCritic(CriticBase):
 
     def evaluate(
         self,
-        events: Sequence["LLMConvertibleEvent"],
+        events: Sequence[LLMConvertibleEvent],
         git_patch: str | None = None,
     ) -> CriticResult:
         text = _extract_last_agent_text(events)
@@ -252,7 +252,7 @@ def _emit_certificate(
     )
 
 
-def _extract_last_agent_text(events: Sequence["LLMConvertibleEvent"]) -> str:
+def _extract_last_agent_text(events: Sequence[LLMConvertibleEvent]) -> str:
     """Extract text from the most recent agent-sourced event.
 
     Walks events in reverse. Prefers ``MessageEvent`` from the agent;

@@ -389,7 +389,6 @@ def test_extract_text_handles_plain_string_from_content_to_str(
         "openhands.sdk.llm.content_to_str", lambda contents: "hello world"
     )
 
-    critic = _make_critic()
     # Bypass the module-level import cache by reaching the function directly.
     text = module._extract_last_agent_text([_agent_msg("placeholder")])
     assert text == "hello world"
