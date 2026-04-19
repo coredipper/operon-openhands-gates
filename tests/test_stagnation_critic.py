@@ -395,6 +395,55 @@ def test_extract_text_handles_plain_string_from_content_to_str(
     assert text == "hello world"
 
 
+def test_emission_failure_leaves_state_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression for roborev jobs 788 & 790 Medium.
+
+    If ``_emit_certificate`` raises (e.g. the theorem isn't registered),
+    the critic must NOT be left in a permanent ``is_stagnant=True /
+    certificate=None`` state — the ``was_stagnant`` guard in the next
+    evaluate() call would otherwise suppress cert emission forever.
+    Build the cert before flipping ``_is_stagnant`` so a failure keeps
+    the state retryable.
+    """
+    critic = _make_critic()
+
+    # Force _emit_certificate to raise on first stagnation transition.
+    raise_count = [0]
+    from operon_openhands_gates import stagnation_critic as module
+
+    original_emit = module._emit_certificate
+
+    def flaky_emit(*args: object, **kwargs: object) -> object:
+        if raise_count[0] == 0:
+            raise_count[0] += 1
+            raise RuntimeError("simulated resolver failure")
+        return original_emit(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_emit_certificate", flaky_emit)
+
+    # Drive the critic to the stagnant transition; the first emission fails.
+    with pytest.raises(RuntimeError, match="simulated resolver failure"):
+        for _ in range(6):
+            critic.evaluate([_agent_msg("stuck response")])
+            if critic._low_integral_streak >= critic.critical_duration:
+                # Next call would transition — force it here to confirm.
+                break
+        # If the loop didn't trigger the exception path, call once more.
+        critic.evaluate([_agent_msg("stuck response")])
+
+    # State after failure: critic is NOT stagnant, no certificate.
+    # (The transition was attempted and the state flip was rolled back.)
+    assert critic.is_stagnant is False
+    assert critic.certificate is None
+
+    # Later call retries emission (now with the real _emit_certificate)
+    # and successfully produces the certificate.
+    for _ in range(6):
+        critic.evaluate([_agent_msg("stuck response")])
+    assert critic.is_stagnant is True
+    assert critic.certificate is not None
+
+
 def test_windowed_theorem_resolves_through_upstream_registry() -> None:
     """Same-process contract: windowed theorem resolves to a callable,
     distinct from the legacy theorem's callable. Uses the public

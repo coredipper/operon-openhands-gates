@@ -145,9 +145,9 @@ class OperonStagnationCritic(CriticBase):
             self._low_integral_streak = 0
 
         was_stagnant = self._is_stagnant
-        self._is_stagnant = self._low_integral_streak >= self.critical_duration
+        should_be_stagnant = self._low_integral_streak >= self.critical_duration
 
-        if self._is_stagnant and not was_stagnant:
+        if should_be_stagnant and not was_stagnant:
             # Evidence = the exact aggregates detection operates on.
             # Stagnation fires when each of the last ``critical_duration``
             # rolling-window integrals is below the detection threshold.
@@ -167,11 +167,20 @@ class OperonStagnationCritic(CriticBase):
             # Store the stability threshold ``1 - self.threshold`` so the
             # verifier's ``max < stored_threshold`` matches detection at
             # every threshold value in [0, 1], not just <= 0.5.
+            #
+            # Emit the certificate *before* flipping ``_is_stagnant`` so a
+            # failure (e.g. unregistered theorem) leaves the critic in its
+            # prior non-stagnant state and a later ``evaluate()`` call can
+            # retry emission once the underlying problem is corrected. If
+            # we flipped state first, the ``was_stagnant/not was_stagnant``
+            # guard below would suppress retry and the critic would be
+            # permanently stuck in ``is_stagnant=True / certificate=None``.
             self._certificate = _emit_certificate(
                 window_severity_means=window_severity_means,
                 threshold=1.0 - self.threshold,
                 detection_index=len(self._severities),
             )
+        self._is_stagnant = should_be_stagnant
 
         status = "STAGNANT" if self._is_stagnant else "healthy"
         metadata: dict[str, Any] = {"severity": severity}
