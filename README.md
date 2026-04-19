@@ -56,7 +56,22 @@ OpenHands' default `success_threshold=0.6` is tuned for LLM probability-of-succe
 
 ## Sibling package
 
-- [`operon-langgraph-gates`](https://github.com/coredipper/operon-langgraph-gates) — same Paper 4 substrate, same `behavioral_stability` certificate, targeted at LangGraph's `StateGraph` with `.wrap()` / `.edge()` node APIs. Two packages, one core — this is the framework-portability claim from Paper 5 §3 in code.
+- [`operon-langgraph-gates`](https://github.com/coredipper/operon-langgraph-gates) — same Paper 4 substrate, same `behavioral_stability_windowed` certificate, targeted at LangGraph's `StateGraph` with `.wrap()` / `.edge()` node APIs. Two packages, one core — this is the framework-portability claim from Paper 5 §3 in code.
+
+## Certificate theorem name and verification
+
+Certificates emitted by this package carry the theorem name `behavioral_stability_windowed` (not the core's shared `behavioral_stability`). The two differ in how they verify:
+
+- `behavioral_stability` (shared core): `mean(severities) < threshold`. Loses the per-window structure that rolling-integral detection operates on.
+- `behavioral_stability_windowed` (this package): `max(per_window_severity_means) <= stability_threshold`. Mirrors detection exactly.
+
+The windowed verifier is registered against `operon_ai.core.certificate`'s `_VERIFY_REGISTRY` at package import time. **In-process verification is transparent**: `certificate.verify()` resolves to the correct verifier as long as this package has been imported.
+
+**Cross-process limitation**: deserializing a `behavioral_stability_windowed` cert in a process that has `operon_ai` installed but has NOT imported `operon_openhands_gates` will fail to resolve the verifier. The canonical fix is upstreaming `_verify_window_max_stability` into `operon_ai.core.certificate` as a registered theorem path; tracked as a follow-up. In the meantime, any process that consumes these certs must import `operon_openhands_gates` (which is already a runtime requirement for producing them).
+
+### Breaking change from pre-alpha prototypes
+
+Earlier pre-release builds emitted certificates with theorem name `behavioral_stability` (the shared core name), bound to a locally-attached `_verify_fn`. That shape was semantically wrong — the shared verifier is flat-mean-based, so any cert round-tripped through serialization would silently revert to the wrong replay logic. Consumers that key on `certificate.theorem == "behavioral_stability"` or `metadata["certificate_theorem"] == "behavioral_stability"` must update to `"behavioral_stability_windowed"`. No migration path is provided; alpha.
 
 ## Citations
 

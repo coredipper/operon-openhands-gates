@@ -295,27 +295,38 @@ def test_certificate_handles_overlapping_windows_counterexample() -> None:
 
 
 def test_certificate_conclusion_uses_exact_detection_index() -> None:
-    """Regression for roborev jobs 765 Low and 773 Low (sibling-sync).
+    """Regression for roborev jobs 765 Low, 773 Low, and 778 Low.
 
-    The conclusion text must quote the exact evaluation count at
-    detection — pinning it to the turn the cert first appears, not a
-    hard-coded value or a bounds check. A regression to reporting some
-    other count (evidence-slice length, final loop count, etc.) would
-    fail on the exact-equality assertion.
+    The conclusion text must quote the exact evaluation count at the
+    moment the cert was emitted — and must *keep* reporting that value
+    after subsequent ``evaluate()`` calls. Breaking out on first
+    emission would let a future regression that rewrites the conclusion
+    on later calls pass undetected. Continue evaluating for several
+    more turns after emission and assert the conclusion still points at
+    the original emission turn.
     """
     import re
 
     critic = OperonStagnationCritic(threshold=0.2, critical_duration=1, window=20)
 
     emission_turn: int | None = None
-    for turn in range(1, 40):
+    for turn in range(1, 41):
         critic.evaluate([_agent_msg("identical saturating text")])
         if critic.certificate is not None and emission_turn is None:
             emission_turn = turn
-            break
+            # Don't break — continue evaluating to verify the conclusion
+            # stays pinned to the original emission turn.
 
     assert emission_turn is not None, "expected a certificate within 40 turns"
     assert critic.certificate is not None
+
+    # By now we've done 40 - emission_turn additional evaluate() calls
+    # after the cert appeared. A regression that rewrites the conclusion
+    # on later calls (e.g. reporting the final loop count) would show up
+    # as a number greater than emission_turn.
+    assert 40 - emission_turn >= 5, (
+        f"fixture too tight: only {40 - emission_turn} post-emission turns"
+    )
 
     conclusion = critic.certificate.conclusion
     match = re.search(r"after (\d+) measurements", conclusion)
@@ -323,10 +334,52 @@ def test_certificate_conclusion_uses_exact_detection_index() -> None:
     reported_n = int(match.group(1))
 
     # One evaluate() call produces one monitor measurement, so the
-    # reported N equals the turn count at which the cert fired.
+    # reported N equals the turn count at which the cert first fired —
+    # not the total number of evaluations performed since.
     assert reported_n == emission_turn, (
-        f"conclusion reports N={reported_n} but emission turn was {emission_turn}"
+        f"conclusion reports N={reported_n} but emission turn was {emission_turn}; "
+        f"cert conclusion must stay pinned to first-emission index"
     )
+
+
+def test_windowed_theorem_resolves_after_cold_import(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Regression for roborev job 776 Medium.
+
+    In-process registration via ``register_verify_fn`` at module import
+    time is enough for any consumer that has imported this package, but
+    the test should verify that registration actually happens on a cold
+    import in a fresh interpreter (not just on the in-test import, which
+    could be polluted by prior test imports). Spawn a subprocess that
+    imports ``operon_openhands_gates`` and then asks
+    ``_resolve_verify_fn`` for the windowed theorem.
+
+    This does NOT fix the true cross-process gap (upstreaming into
+    ``operon_ai.core.certificate``'s ``_THEOREM_FN_PATHS``), which is
+    tracked as a follow-up. It does pin the claim this package makes:
+    any process that imports us resolves the verifier correctly.
+    """
+    import subprocess
+    import sys
+
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import operon_openhands_gates  # noqa: F401 — triggers register_verify_fn\n"
+        "from operon_ai.core.certificate import _resolve_verify_fn\n"
+        "from operon_openhands_gates.stagnation_critic import _verify_window_max_stability\n"
+        "fn = _resolve_verify_fn('behavioral_stability_windowed')\n"
+        "assert fn is _verify_window_max_stability, f'got {fn!r}'\n"
+        "print('ok')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, str(probe)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"subprocess failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert result.stdout.strip().endswith("ok")
 
 
 def test_certificate_replay_agrees_with_detection_for_threshold_above_half() -> None:
