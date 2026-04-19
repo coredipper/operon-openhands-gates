@@ -485,18 +485,28 @@ def test_windowed_theorem_resolves_without_this_package_imported(tmp_path) -> No
 
     probe = tmp_path / "probe.py"
     probe.write_text(
-        "import operon_ai  # noqa: F401\n"
-        "from operon_ai.core.certificate import _resolve_verify_fn\n"
-        "fn = _resolve_verify_fn('behavioral_stability_windowed')\n"
-        "assert fn is not None, 'windowed theorem did not resolve'\n"
-        "assert callable(fn), f'resolver returned non-callable: {fn!r}'\n"
+        "from operon_ai.core.certificate import Certificate\n"
+        "\n"
+        "# Exercise the exact public path _emit_certificate uses:\n"
+        "# Certificate.from_theorem resolves the verifier internally and\n"
+        "# the resulting cert must verify as 'breach' (holds=False) on\n"
+        "# per-window means above the stability threshold.\n"
+        "cert = Certificate.from_theorem(\n"
+        "    theorem='behavioral_stability_windowed',\n"
+        "    parameters={'signal_values': (0.9,), 'threshold': 0.8},\n"
+        "    conclusion='cold-process probe',\n"
+        "    source='test',\n"
+        ")\n"
+        "verification = cert.verify()\n"
+        "assert verification.holds is False, verification\n"
+        "\n"
         "import sys as _sys\n"
         "assert 'operon_openhands_gates' not in _sys.modules, (\n"
         "    'sibling package was imported as a side effect; resolution "
         "must not depend on it'\n"
         ")\n"
         "print('ok')\n",
-        encoding="utf-8",
+        encoding='utf-8',
     )
     result = subprocess.run(
         [sys.executable, str(probe)],
