@@ -32,7 +32,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "operon-ai>=0.34.4",
+  "operon-ai>=0.36.0",
   "openhands-sdk>=1.15",
   "pydantic>=2.0",
 ]

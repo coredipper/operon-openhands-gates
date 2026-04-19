@@ -194,10 +194,9 @@ def test_empty_evidence_is_rejected_not_vacuously_stable() -> None:
     "stability held" attestation. Two layers of defense: the emitter
     raises, and the verifier rejects.
     """
-    from operon_openhands_gates.stagnation_critic import (
-        _emit_certificate,
-        _verify_window_max_stability,
-    )
+    from operon_ai.core.certificate import _verify_behavioral_stability_windowed
+
+    from operon_openhands_gates.stagnation_critic import _emit_certificate
 
     # Emission-time guard: can't produce an empty cert in the first place.
     with pytest.raises(ValueError, match="non-empty"):
@@ -209,7 +208,7 @@ def test_empty_evidence_is_rejected_not_vacuously_stable() -> None:
 
     # Verifier-time guard: an externally-constructed empty cert fails
     # replay rather than silently attesting stability.
-    holds, evidence = _verify_window_max_stability(
+    holds, evidence = _verify_behavioral_stability_windowed(
         {"signal_values": (), "threshold": 0.8}
     )
     assert holds is False
@@ -342,46 +341,6 @@ def test_certificate_conclusion_uses_exact_detection_index() -> None:
     )
 
 
-def test_windowed_theorem_resolves_after_cold_import(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """Regression for roborev job 776 Medium.
-
-    In-process registration via ``register_verify_fn`` at module import
-    time is enough for any consumer that has imported this package, but
-    the test should verify that registration actually happens on a cold
-    import in a fresh interpreter (not just on the in-test import, which
-    could be polluted by prior test imports). Spawn a subprocess that
-    imports ``operon_openhands_gates`` and then asks
-    ``_resolve_verify_fn`` for the windowed theorem.
-
-    This does NOT fix the true cross-process gap (upstreaming into
-    ``operon_ai.core.certificate``'s ``_THEOREM_FN_PATHS``), which is
-    tracked as a follow-up. It does pin the claim this package makes:
-    any process that imports us resolves the verifier correctly.
-    """
-    import subprocess
-    import sys
-
-    probe = tmp_path / "probe.py"
-    probe.write_text(
-        "import operon_openhands_gates  # noqa: F401 — triggers register_verify_fn\n"
-        "from operon_ai.core.certificate import _resolve_verify_fn\n"
-        "from operon_openhands_gates.stagnation_critic import _verify_window_max_stability\n"
-        "fn = _resolve_verify_fn('behavioral_stability_windowed')\n"
-        "assert fn is _verify_window_max_stability, f'got {fn!r}'\n"
-        "print('ok')\n"
-    )
-    result = subprocess.run(
-        [sys.executable, str(probe)],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert result.returncode == 0, (
-        f"subprocess failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-    )
-    assert result.stdout.strip().endswith("ok")
-
-
 def test_certificate_replay_agrees_with_detection_for_threshold_above_half() -> None:
     """Regression for roborev job 763 (Medium).
 
@@ -436,25 +395,21 @@ def test_extract_text_handles_plain_string_from_content_to_str(
     assert text == "hello world"
 
 
-def test_windowed_theorem_is_registered_for_round_trip_verify() -> None:
-    """Sibling-sync regression: the custom verifier must be registered
-    against a unique theorem name so that a deserialized certificate
-    resolves back to our verifier rather than silently falling back to
-    the core's flat-mean ``_verify_behavioral_stability`` (which is what's
-    registered for the shared ``behavioral_stability`` theorem name).
+def test_windowed_theorem_resolves_through_upstream_registry() -> None:
+    """The windowed theorem is registered in operon_ai's canonical
+    ``_THEOREM_FN_PATHS`` (since operon-ai 0.36.0), so resolution is
+    import-order-independent — no ``register_verify_fn`` side effect
+    is required from this package.
     """
     from operon_ai.core.certificate import (
         _resolve_verify_fn,
         _verify_behavioral_stability,
+        _verify_behavioral_stability_windowed,
     )
 
-    from operon_openhands_gates.stagnation_critic import (
-        _verify_window_max_stability,
+    assert (
+        _resolve_verify_fn("behavioral_stability_windowed")
+        is _verify_behavioral_stability_windowed
     )
-
-    resolved = _resolve_verify_fn("behavioral_stability_windowed")
-    assert resolved is _verify_window_max_stability
-
-    # The shared name still resolves to the core's flat-mean verifier —
-    # we didn't clobber it.
+    # The shared (flat-mean) theorem is unchanged — we didn't clobber it.
     assert _resolve_verify_fn("behavioral_stability") is _verify_behavioral_stability

@@ -30,13 +30,13 @@ framework-portability claim in code.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from openhands.sdk.critic.base import CriticBase
 from openhands.sdk.critic.result import CriticResult
-from operon_ai.core.certificate import Certificate, register_verify_fn
+from operon_ai.core.certificate import Certificate, _verify_behavioral_stability_windowed
 from operon_ai.health.epiplexity import EpiplexityMonitor
 from pydantic import ConfigDict, Field, PrivateAttr
 
@@ -241,47 +241,8 @@ def _emit_certificate(
             f"captured for replay verification."
         ),
         source="operon_openhands_gates.stagnation_critic",
-        _verify_fn=_verify_window_max_stability,
+        _verify_fn=_verify_behavioral_stability_windowed,
     )
-
-
-def _verify_window_max_stability(
-    params: Mapping[str, Any],
-) -> tuple[bool, dict[str, Any]]:
-    """Replay: every window's mean severity is within the stability bound.
-
-    Stable ⟺ ``max(window_means) <= threshold``. The ``<=`` (not ``<``)
-    mirrors detection's strict ``integral < threshold`` predicate exactly:
-    detection says "stagnant iff integral < τ_d", so "stable iff
-    integral >= τ_d". In the severity domain this becomes "stable iff
-    mean(severity) <= 1 - τ_d = τ_s", which is an inclusive upper bound.
-    A strict ``<`` here would misclassify the equality boundary as
-    unstable — the detector treats it as stable.
-
-    This mirrors the detection aggregate directly. Using a flat
-    ``mean < threshold`` check (as ``operon_ai.core.certificate._verify_behavioral_stability``
-    does) loses the per-window structure: overlapping windows weight
-    interior samples more heavily than a flat mean does, so a flat-mean
-    replay can say stability held even when every rolling window was
-    violating.
-    """
-    values = list(params["signal_values"])
-    threshold = params["threshold"]
-    # Every emitted stagnation certificate has at least one violating
-    # window by construction (``critical_duration >= 1`` is enforced by
-    # the Pydantic validator on the critic). An empty ``signal_values``
-    # therefore signals a malformed or externally-constructed certificate,
-    # not vacuous stability — reject it outright instead of silently
-    # attesting that stability held.
-    if not values:
-        return False, {"max": 0.0, "mean": 0.0, "n": 0, "reason": "empty_evidence"}
-    max_v = max(values)
-    mean_v = sum(values) / len(values)
-    return max_v <= threshold, {
-        "max": round(max_v, 4),
-        "mean": round(mean_v, 4),
-        "n": len(values),
-    }
 
 
 def _extract_last_agent_text(events: Sequence["LLMConvertibleEvent"]) -> str:
@@ -323,18 +284,9 @@ def _is_agent(event: Any) -> bool:
     return str(getattr(event, "source", "")).lower().endswith("agent")
 
 
-# A theorem name unique to the windowed verifier. Reusing the shared
-# ``behavioral_stability`` name would cause deserialized certificates to
-# be re-verified with the core's flat-mean ``_verify_behavioral_stability``
-# (via ``_THEOREM_FN_PATHS`` lookup), silently reintroducing the exact
-# flat-mean semantics this package is replacing. Registering a distinct
-# theorem keeps in-memory and round-tripped certs in sync.
+# A theorem name distinct from the shared ``behavioral_stability`` (which is
+# flat-mean-based). Upstream ``operon_ai.core.certificate`` registers this
+# theorem in ``_THEOREM_FN_PATHS``, so any consumer with ``operon-ai>=0.36``
+# resolves the correct verifier via ``_resolve_verify_fn`` without needing
+# to import this package first.
 _WINDOWED_THEOREM = "behavioral_stability_windowed"
-
-
-# Register once at import time. ``_resolve_verify_fn`` checks
-# ``_VERIFY_REGISTRY`` before ``_THEOREM_FN_PATHS``, so this takes
-# precedence for the windowed theorem while leaving the legacy
-# ``behavioral_stability`` name resolving to the core's flat-mean
-# verifier as before.
-register_verify_fn(_WINDOWED_THEOREM, _verify_window_max_stability)
