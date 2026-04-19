@@ -396,23 +396,21 @@ def test_extract_text_handles_plain_string_from_content_to_str(
 
 
 def test_windowed_theorem_resolves_through_upstream_registry() -> None:
-    """Same-process sanity: windowed theorem resolves to a callable and
-    doesn't clobber the legacy theorem. Fresh-interpreter coverage is in
-    ``test_windowed_theorem_resolves_without_this_package_imported``
-    below — the two tests are complementary, not redundant.
+    """Same-process contract: windowed theorem resolves to a callable,
+    distinct from the legacy theorem's callable. No hard-coded identity
+    check against a private operon-ai symbol — a future refactor that
+    renames the implementation but keeps the theorem contract stable
+    should not break this test.
     """
-    from operon_ai.core.certificate import (
-        _resolve_verify_fn,
-        _verify_behavioral_stability,
-        _verify_behavioral_stability_windowed,
-    )
+    from operon_ai.core.certificate import _resolve_verify_fn
 
-    assert (
-        _resolve_verify_fn("behavioral_stability_windowed")
-        is _verify_behavioral_stability_windowed
-    )
-    # The shared (flat-mean) theorem is unchanged — we didn't clobber it.
-    assert _resolve_verify_fn("behavioral_stability") is _verify_behavioral_stability
+    windowed = _resolve_verify_fn("behavioral_stability_windowed")
+    legacy = _resolve_verify_fn("behavioral_stability")
+
+    assert windowed is not None and callable(windowed)
+    assert legacy is not None and callable(legacy)
+    # Distinct theorems — we added a new entry, didn't alias the old.
+    assert windowed is not legacy
 
 
 def test_windowed_theorem_resolves_without_this_package_imported(tmp_path) -> None:  # type: ignore[no-untyped-def]
