@@ -121,3 +121,34 @@ def test_empty_events_returns_valid_result() -> None:
     result = critic.evaluate([])
     assert 0.0 <= result.score <= 1.0
     assert critic.is_stagnant is False
+
+
+def test_certificate_evidence_reflects_detection_window_not_full_history() -> None:
+    """Regression for roborev job 760 High finding.
+
+    Long diverse-output healthy prefix followed by a stagnant suffix must
+    produce a certificate whose replay returns ``holds=False``. Previously
+    the certificate was built from the entire accumulated history, so a
+    long healthy prefix could dilute the mean severity below threshold and
+    make ``verify().holds`` return True — contradicting the detection that
+    actually fired.
+    """
+    critic = _make_critic()
+    # Healthy prefix: 3x the diverse-response set. Longer than the stagnant
+    # suffix by ~8x so the full-history mean would be dominated by healthy.
+    for text in _DIVERSE_RESPONSES * 3:
+        critic.evaluate([_agent_msg(text)])
+    assert critic.is_stagnant is False
+    assert critic.certificate is None
+
+    # Stagnant suffix — long enough for the integral to clearly cross
+    # threshold after the diverse prefix flushes out of the window.
+    for _ in range(10):
+        critic.evaluate([_agent_msg("identical stuck answer")])
+    assert critic.is_stagnant is True
+    assert critic.certificate is not None
+
+    # Certificate must reflect the *detection window*, not the full history.
+    verification = critic.certificate.verify()
+    assert verification.holds is False
+    assert verification.evidence["n"] == critic.critical_duration

@@ -148,8 +148,14 @@ class OperonStagnationCritic(CriticBase):
         self._is_stagnant = self._low_integral_streak >= self.critical_duration
 
         if self._is_stagnant and not was_stagnant:
+            # Emit the certificate from the detection window only — the
+            # ``critical_duration`` most-recent severities, which are exactly
+            # the streak that crossed the threshold. Using the full history
+            # would let a long healthy prefix dilute the mean and make
+            # ``verify().holds`` return True even though stagnation fired.
+            window_severities = self._severities[-self.critical_duration :]
             self._certificate = _emit_certificate(
-                severities=self._severities, threshold=self.threshold
+                severities=window_severities, threshold=self.threshold
             )
 
         status = "STAGNANT" if self._is_stagnant else "healthy"
@@ -214,7 +220,15 @@ def _extract_last_agent_text(events: Sequence["LLMConvertibleEvent"]) -> str:
                 parts = content_to_str(event.llm_message.content)
             except Exception:
                 parts = []
-            joined = " ".join(p for p in parts if p).strip()
+            # ``content_to_str`` in ``openhands-sdk==1.17`` returns ``list[str]``
+            # (see openhands-sdk/openhands/sdk/llm/message.py:697). Branch
+            # defensively in case a future SDK version returns a plain string
+            # — iterating a string would join characters with spaces and
+            # corrupt the monitor's input.
+            if isinstance(parts, str):
+                joined = parts.strip()
+            else:
+                joined = " ".join(p for p in parts if p).strip()
             if joined:
                 return joined
     return ""
