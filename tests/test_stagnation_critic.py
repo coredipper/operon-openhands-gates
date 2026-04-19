@@ -98,16 +98,16 @@ def test_certificate_captures_replayable_instability_evidence() -> None:
         critic.evaluate([_agent_msg("stuck stuck stuck")])
     assert critic.certificate is not None
 
-    # The ``behavioral_stability`` theorem semantics: holds=True means
-    # stability held (mean severity < threshold, i.e. no stagnation).
-    # This certificate is emitted *on* detection, so by construction the
-    # severities ran high and stability does NOT hold — the certificate
-    # is replayable evidence of the breach, not of the guarantee.
+    # Replay semantic: ``max(window_severity_means) < stability_threshold``
+    # means stability held. The cert fires on detection, which means
+    # every violating window's mean severity was above threshold, so
+    # ``max`` is above threshold and ``holds`` is False.
     verification = critic.certificate.verify()
     assert verification.holds is False
     assert "mean" in verification.evidence
     assert "max" in verification.evidence
-    assert verification.evidence["n"] >= critic.critical_duration
+    # One entry per violating rolling window.
+    assert verification.evidence["n"] == critic.critical_duration
 
 
 def test_evaluate_accepts_git_patch_kwarg() -> None:
@@ -148,29 +148,23 @@ def test_certificate_evidence_reflects_detection_window_not_full_history() -> No
     assert critic.is_stagnant is True
     assert critic.certificate is not None
 
-    # Certificate must reflect the samples that backed the violating
-    # integrals — ``window + critical_duration - 1`` severities — not the
-    # full history. Verify replay disagrees with stability (holds=False)
-    # and the evidence length equals the detection-window size.
+    # Certificate stores one mean severity per violating rolling window,
+    # so ``evidence["n"] == critical_duration`` (not the full history).
+    # Replay: ``max < stability_threshold`` is False since every window
+    # exceeded threshold.
     verification = critic.certificate.verify()
     assert verification.holds is False
-    assert verification.evidence["n"] == critic.window + critic.critical_duration - 1
+    assert verification.evidence["n"] == critic.critical_duration
 
 
-def test_certificate_evidence_spans_violating_integral_windows() -> None:
-    """Regression for roborev jobs 761 & 762 (High).
+def test_certificate_evidence_is_per_window_severity_means() -> None:
+    """Regression for roborev jobs 761, 762, 764 (High).
 
-    Certificate evidence must span the samples that backed the violating
-    integrals — last ``window + critical_duration - 1`` severities — not
-    just the latest point severities. Under ``critical_duration=1`` with
-    a large window, the previous narrow-fix would give
-    ``len(signal_values) == 1``; the correct fix gives
-    ``len(signal_values) == window``.
-
-    The assertion on ``signal_values`` length is the load-bearing
-    discriminator: it distinguishes the correct fix from the earlier
-    broken ``severities[-critical_duration:]`` fix regardless of whether
-    ``holds`` happens to agree between the two in this input sequence.
+    Detection fires when each of ``critical_duration`` rolling-window
+    integrals is below the detection threshold. Certificate evidence
+    must be one mean per violating window — not a flattened raw-severity
+    sequence. The replay check is ``max(window_means) < stability_threshold``,
+    which exactly mirrors detection's "every window violates" predicate.
     """
     critic = OperonStagnationCritic(threshold=0.2, critical_duration=1, window=20)
     for _ in range(25):
@@ -178,15 +172,77 @@ def test_certificate_evidence_spans_violating_integral_windows() -> None:
     assert critic.is_stagnant is True
     assert critic.certificate is not None
 
-    # Load-bearing discriminator: under the earlier broken fix,
-    # len(signal_values) would be critical_duration (= 1), not
-    # window + critical_duration - 1 (= 20).
+    # One signal value per violating rolling window.
     signal_values = critic.certificate.parameters["signal_values"]
-    assert len(signal_values) == critic.window + critic.critical_duration - 1
+    assert len(signal_values) == critic.critical_duration
 
+    # Replay: max of per-window means exceeds stability threshold.
     verification = critic.certificate.verify()
     assert verification.holds is False
-    assert verification.evidence["n"] == critic.window + critic.critical_duration - 1
+    assert verification.evidence["n"] == critic.critical_duration
+    assert verification.evidence["max"] >= 1.0 - critic.threshold
+
+
+def test_certificate_handles_overlapping_windows_counterexample() -> None:
+    """Regression for roborev job 764 High (reviewer's counterexample).
+
+    Overlapping rolling windows weight interior samples more heavily
+    than a flattened mean. Example: ``window=2, cd=2`` with severities
+    ``[0.61, 1.0, 0.61]``. Both window means are ``0.805`` (detection
+    fires against stability threshold ``0.8``). The flattened mean over
+    the union is only ``0.74``, which would incorrectly say stability
+    held.
+
+    Exercises ``_emit_certificate`` directly with constructed inputs so
+    the discriminator is input-space-precise, not embedder-dependent.
+    """
+    from operon_openhands_gates.stagnation_critic import _emit_certificate
+
+    # Reviewer's scenario: two overlapping windows each with mean 0.805.
+    cert = _emit_certificate(
+        window_severity_means=(0.805, 0.805),
+        threshold=0.8,  # stability threshold = 1 - detection threshold
+        detection_index=3,
+    )
+    verification = cert.verify()
+    assert verification.holds is False
+    assert verification.evidence["max"] == 0.805
+    assert verification.evidence["n"] == 2
+
+    # Control: under the old flattened-mean verify, these severities
+    # would have given mean=0.74 and holds=True. Confirm that using
+    # the correct per-window-means input with max-based verify we get
+    # the correct verdict.
+
+    # Positive control: every window mean below threshold → stable.
+    stable_cert = _emit_certificate(
+        window_severity_means=(0.5, 0.5),
+        threshold=0.8,
+        detection_index=3,
+    )
+    assert stable_cert.verify().holds is True
+
+
+def test_certificate_conclusion_uses_total_detection_index_not_slice_length() -> None:
+    """Regression for roborev job 765 (Low).
+
+    After a long healthy prefix, the cert's human-readable conclusion
+    must report the actual measurement count at detection time, not the
+    length of the evidence slice. Previously the conclusion said
+    ``"after N measurements"`` with N = len(severities[-(window + cd - 1):])
+    which under-reports when the true detection index is much larger.
+    """
+    critic = OperonStagnationCritic(threshold=0.2, critical_duration=1, window=20)
+    for _ in range(25):
+        critic.evaluate([_agent_msg("identical saturating text")])
+    assert critic.certificate is not None
+
+    # The conclusion text must quote the total evaluation count (~21)
+    # not the evidence-slice length (== window).
+    conclusion = critic.certificate.conclusion
+    # First violating integral arrives once the window is filled, so the
+    # detection index is at least ``window`` (> critical_duration).
+    assert "after 21 measurements" in conclusion or "after 20 measurements" in conclusion
 
 
 def test_certificate_replay_agrees_with_detection_for_threshold_above_half() -> None:
