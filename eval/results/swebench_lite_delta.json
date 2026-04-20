@@ -1,7 +1,7 @@
 {
-  "run_id": "87e28968-cbd6-46d1-a17d-8f3b59825557",
+  "run_id": "7b2b0154-47a1-471f-96ba-9dde409f984f",
   "dataset": "princeton-nlp/SWE-bench_Lite",
-  "timestamp": "2026-04-20T20:14:51.121463+00:00",
+  "timestamp": "2026-04-20T20:20:14.056068+00:00",
   "model": "openai/gpt-5",
   "conditions": [
     "baseline",
@@ -54,8 +54,11 @@
         "mean": 12384.0,
         "median": 11424.0
       },
-      "critic_retried_instances": 0,
-      "critic_retry_rate": 0.0,
+      "critic_rejections": 0,
+      "critic_rejection_rate": 0.0,
+      "completed_retries": 0,
+      "aborted_retries": 0,
+      "aborted_retry_instance_ids": [],
       "max_attempt_histogram": {
         "1": 10
       }
@@ -90,8 +93,13 @@
         "mean": 17548.8,
         "median": 17920.0
       },
-      "critic_retried_instances": 5,
-      "critic_retry_rate": 0.5,
+      "critic_rejections": 6,
+      "critic_rejection_rate": 0.6,
+      "completed_retries": 5,
+      "aborted_retries": 1,
+      "aborted_retry_instance_ids": [
+        "django__django-11019"
+      ],
       "max_attempt_histogram": {
         "1": 5,
         "2": 5
@@ -103,6 +111,7 @@
       "instance_id": "astropy__astropy-12907",
       "baseline_max_attempt": 1,
       "treatment_max_attempt": 1,
+      "treatment_retry_aborted": false,
       "baseline_cumulative_cost_usd": 0.2939,
       "treatment_cumulative_cost_usd": 0.2452,
       "baseline_final_patch_len": 809,
@@ -112,6 +121,7 @@
       "instance_id": "django__django-11001",
       "baseline_max_attempt": 1,
       "treatment_max_attempt": 2,
+      "treatment_retry_aborted": false,
       "baseline_cumulative_cost_usd": 0.4041,
       "treatment_cumulative_cost_usd": 1.0307,
       "baseline_final_patch_len": 1570,
@@ -121,6 +131,7 @@
       "instance_id": "django__django-11019",
       "baseline_max_attempt": 1,
       "treatment_max_attempt": 1,
+      "treatment_retry_aborted": true,
       "baseline_cumulative_cost_usd": 0.6838,
       "treatment_cumulative_cost_usd": 0.6637,
       "baseline_final_patch_len": 5305,
@@ -130,6 +141,7 @@
       "instance_id": "django__django-11099",
       "baseline_max_attempt": 1,
       "treatment_max_attempt": 2,
+      "treatment_retry_aborted": false,
       "baseline_cumulative_cost_usd": 0.237,
       "treatment_cumulative_cost_usd": 0.6525,
       "baseline_final_patch_len": 901,
@@ -139,6 +151,7 @@
       "instance_id": "django__django-11283",
       "baseline_max_attempt": 1,
       "treatment_max_attempt": 2,
+      "treatment_retry_aborted": false,
       "baseline_cumulative_cost_usd": 0.3952,
       "treatment_cumulative_cost_usd": 0.6586,
       "baseline_final_patch_len": 2989,
@@ -148,6 +161,7 @@
       "instance_id": "django__django-11564",
       "baseline_max_attempt": 1,
       "treatment_max_attempt": 1,
+      "treatment_retry_aborted": false,
       "baseline_cumulative_cost_usd": 0.8069,
       "treatment_cumulative_cost_usd": 0.627,
       "baseline_final_patch_len": 2671,
@@ -157,6 +171,7 @@
       "instance_id": "django__django-11815",
       "baseline_max_attempt": 1,
       "treatment_max_attempt": 2,
+      "treatment_retry_aborted": false,
       "baseline_cumulative_cost_usd": 0.4288,
       "treatment_cumulative_cost_usd": 0.9383,
       "baseline_final_patch_len": 1552,
@@ -166,6 +181,7 @@
       "instance_id": "django__django-11848",
       "baseline_max_attempt": 1,
       "treatment_max_attempt": 1,
+      "treatment_retry_aborted": false,
       "baseline_cumulative_cost_usd": 0.3294,
       "treatment_cumulative_cost_usd": 0.3729,
       "baseline_final_patch_len": 935,
@@ -175,6 +191,7 @@
       "instance_id": "django__django-11964",
       "baseline_max_attempt": 1,
       "treatment_max_attempt": 1,
+      "treatment_retry_aborted": false,
       "baseline_cumulative_cost_usd": 0.3932,
       "treatment_cumulative_cost_usd": 0.3912,
       "baseline_final_patch_len": 759,
@@ -184,6 +201,7 @@
       "instance_id": "django__django-11999",
       "baseline_max_attempt": 1,
       "treatment_max_attempt": 2,
+      "treatment_retry_aborted": false,
       "baseline_cumulative_cost_usd": 0.2374,
       "treatment_cumulative_cost_usd": 1.0002,
       "baseline_final_patch_len": 896,
@@ -193,7 +211,7 @@
   "caveats": [
     "n=10, django-dominant (not representative of full SWE-bench-lite).",
     "`resolved` field is None in all rows; SWE-bench patch-evaluation step was not run. Patch quality is reported by proxy (length + per-instance diff) only.",
-    "OperonStagnationCritic's CriticResult.metadata (certificate_theorem, cert_evidence_n) is not serialized into on-disk event history \u2014 known openhands-sdk gap. Critic firing is inferred from Attempt-2 retries, not from on-disk certificate records.",
-    "django__django-11019 Attempt-2 hit the 60-min per-attempt timeout and was killed (its Attempt-1 row only). Treatment cumulative cost for that instance is undercounted relative to what a clean run would have produced."
+    "OperonStagnationCritic's CriticResult.metadata (certificate_theorem, cert_evidence_n) is not serialized into on-disk event history \u2014 known openhands-sdk gap. Critic firing is inferred from Attempt-2 presence (completed retries) or from the aborted-retries list, not from on-disk certificate records.",
+    "django__django-11019's critic rejected Attempt-1 and triggered Attempt-2, which timed out (60-min per-attempt ceiling) and was killed. Counted as a critic rejection in the headline rate, but no Attempt-2 row exists in output.jsonl \u2014 see `treatment_retry_aborted: true` per-instance and `aborted_retries: 1` in the summary."
   ]
 }

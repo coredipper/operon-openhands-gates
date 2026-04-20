@@ -7,37 +7,45 @@
 
 ## Headline numbers
 
-| Metric                    | Baseline | Operon stagnation | Δ        |
-|---------------------------|---------:|------------------:|---------:|
-| Instances                 |       10 |                10 |        — |
-| Critic-triggered retries  |        0 |                 5 |   **+5** |
-| Max-attempt = 2 rate      |       0% |              50%  | **+50%** |
-| Cumulative cost (USD)     |    $4.21 |             $6.58 |   **+56%** |
-| Mean final patch length   |   1,839  |            1,712  |   −7%    |
-| Mean history events       |     80.3 |              80.6 |     ~0%  |
+| Metric                          | Baseline | Operon stagnation | Δ          |
+|---------------------------------|---------:|------------------:|-----------:|
+| Instances                       |       10 |                10 | —          |
+| Critic rejections               |        0 |                 6 | **+6** |
+| &nbsp;&nbsp;&nbsp;completed retries | — |                 5 | — |
+| &nbsp;&nbsp;&nbsp;aborted retries (timeout) | — |                 1 | — |
+| Critic-rejection rate           |       0% |               60% | **+60 pp** |
+| Cumulative cost (USD)           | $  4.21 | $            6.58 | **+56%** (+$2.37) |
+| Mean final patch length (chars) |     1839 |              1712 | — |
+| Mean final history events       |     80.3 |              80.6 | — |
+
+Per-rejection budget overhead: **$0.40** (= total cost delta / critic_rejections).
 
 **Raw artifact:** [`swebench_lite_delta.json`](./swebench_lite_delta.json).
 
 ## What the critic did
 
-On the 10-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected 5 of 10 first-attempt patches and triggered a second refinement iteration. That's a **measurable behavioral delta** — the structural critic reaches different "done" decisions than an LLM-judged critic on the same agent trajectories.
+On the 10-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected 6 of 10 first-attempt patches (60%): 5 triggered a second refinement iteration that completed, and 1 triggered a retry that timed out before completing (`django__django-11019` — 60-min per-attempt ceiling).
 
-The cost is a **56% budget overhead** for the slice (~$0.20/instance retried, twice the tokens of a no-retry instance). Whether the retry *improves* the patch against the gold fix is not measured here; see caveats.
+That's a **measurable behavioral delta** — the structural critic reaches different "done" decisions than an LLM-judged critic on the same agent trajectories. The cost is a **+56% budget overhead** for the slice. Whether retries *improve* correctness against the gold fix is not measured here; see caveats.
 
 ## Instance-level table
 
-| Instance                     | Baseline attempts | Treatment attempts | Baseline cost | Treatment cost |
-|------------------------------|------------------:|-------------------:|--------------:|---------------:|
-| `astropy__astropy-12907`     | 1                 | 1                  | $0.28         | $0.25          |
-| `django__django-11001`       | 1                 | **2**              | $0.44         | **$1.03**      |
-| `django__django-11019`       | 1                 | 1 *(see caveat)*   | $0.37         | $0.66          |
-| `django__django-11099`       | 1                 | **2**              | $0.25         | **$0.65**      |
-| `django__django-11283`       | 1                 | **2**              | $0.29         | **$0.65**      |
-| `django__django-11564`       | 1                 | 1                  | $0.60         | $0.63          |
-| `django__django-11815`       | 1                 | **2**              | $0.41         | **$0.94**      |
-| `django__django-11848`       | 1                 | 1                  | $0.41         | $0.37          |
-| `django__django-11964`       | 1                 | 1                  | $0.28         | $0.39          |
-| `django__django-11999`       | 1                 | **2**              | $0.88         | **$1.00**      |
+All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delta.json) `per_instance[*]` (roborev #834).
+
+| Instance | Baseline attempts | Treatment attempts | Baseline cost | Treatment cost |
+|----------|------------------:|-------------------:|--------------:|---------------:|
+| `astropy__astropy-12907` | 1 | 1 | $0.29 | $0.25 |
+| `django__django-11001` | 1 | **2** | $0.40 | **$1.03** |
+| `django__django-11019` | 1 | **1 → aborted 2** | $0.68 | **$0.66** |
+| `django__django-11099` | 1 | **2** | $0.24 | **$0.65** |
+| `django__django-11283` | 1 | **2** | $0.40 | **$0.66** |
+| `django__django-11564` | 1 | 1 | $0.81 | $0.63 |
+| `django__django-11815` | 1 | **2** | $0.43 | **$0.94** |
+| `django__django-11848` | 1 | 1 | $0.33 | $0.37 |
+| `django__django-11964` | 1 | 1 | $0.39 | $0.39 |
+| `django__django-11999` | 1 | **2** | $0.24 | **$1.00** |
+
+`1 → aborted 2` = critic rejected Attempt-1, Attempt-2 started but timed out before completion (per-instance `treatment_retry_aborted: true` in the JSON).
 
 ## Caveats (read these before citing)
 
@@ -45,9 +53,9 @@ The cost is a **56% budget overhead** for the slice (~$0.20/instance retried, tw
 
 2. **`resolved` not computed.** Both conditions produced non-empty `git_patch` outputs, but the SWE-bench patch-evaluation step (which applies patches and runs `FAIL_TO_PASS` / `PASS_TO_PASS` tests) was not run. The critic-retry delta is a behavioral signal; the underlying pass@1 comparison requires the evaluation pipeline.
 
-3. **Certificate metadata not serialized.** `OperonStagnationCritic` emits `CriticResult.metadata` with `certificate_theorem="behavioral_stability_windowed"` on stagnation fires. That metadata field is **not captured** in the serialized event history (`critic_result` field on `MessageEvent` / `ActionEvent` is `null` throughout). This is an openhands-sdk serialization gap, not a critic bug. Critic firing is inferred from Attempt-2 presence, not from on-disk certificate records. Fixing this requires either patching the SDK or adding a side-channel log from inside `OperonStagnationCritic.evaluate()`.
+3. **Certificate metadata not serialized.** `OperonStagnationCritic` emits `CriticResult.metadata` with `certificate_theorem="behavioral_stability_windowed"` on stagnation fires. That metadata field is **not captured** in the serialized event history (`critic_result` field on `MessageEvent` / `ActionEvent` is `null` throughout). Known openhands-sdk serialization gap, not a critic bug. Critic firing is inferred from Attempt-2 presence (for completed retries) or from the pinned aborted-retry list (for the timed-out one), not from on-disk certificate records. Fixing this requires either patching the SDK or adding a side-channel log from inside `OperonStagnationCritic.evaluate()`.
 
-4. **`django__django-11019` Attempt-2 timeout.** This instance's critic rejected Attempt-1 and triggered retry. The retry ran 38+ minutes and hit the per-attempt 60-min ceiling. The run was killed to avoid a multi-hour retry cascade. Treatment's cumulative cost for this instance is therefore a lower bound; the true cost for a clean retry path would be higher.
+4. **`django__django-11019` Attempt-2 timeout.** The critic rejected Attempt-1 and triggered retry. The retry ran 38+ minutes and hit the per-attempt 60-min ceiling. The run was killed to avoid a multi-hour retry cascade. Counted as a critic rejection in the headline rate (`aborted_retries: 1`), but no Attempt-2 row exists in `output.jsonl` — its cumulative cost row undercounts what a clean retry would have produced.
 
 5. **Single model (GPT-5).** Paper 4's `threshold=0.2` epiplexic-integral cutoff was validated on different model families (sentence-MiniLM embeddings at n=300 trials). Behavior on GPT-5 trajectories may have different stagnation dynamics than the validation set.
 
@@ -55,8 +63,8 @@ The cost is a **56% budget overhead** for the slice (~$0.20/instance retried, tw
 
 **Does:**
 - The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances.
-- The structural critic exhibits a measurably different retry pattern from the default LLM critic (50% retry rate vs 0%).
-- Retries cost ~2× per-instance and roll up to a 56% overall overhead at this slice.
+- The structural critic exhibits a measurably different rejection pattern from the default LLM critic (60% vs 0%).
+- Retries cost roughly **$0.40 per rejected instance**, rolling up to a **+56% overall overhead** at this slice.
 
 **Does not:**
 - Establish whether retries improve patch correctness — that needs the SWE-bench evaluation step.
