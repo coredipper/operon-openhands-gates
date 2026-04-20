@@ -38,30 +38,24 @@ from pathlib import Path
 # resolves its critic, which happens inside main(). Keep this first.
 import register_critic  # noqa: F401 — load for side effect
 
-# Location of the benchmarks repo clone. Two chdir targets are needed
-# during a run:
+# Location of the benchmarks repo clone. chdir into it for the full
+# duration of the run for two reasons:
 #
-#   (A) ``_VENDOR_BENCHMARKS_DIR`` — the benchmarks repo root. Required
-#       during ``import benchmarks.swebench.run_infer`` because
-#       ``benchmarks.utils.version`` computes ``SDK_SHA`` at import time
-#       by running ``git submodule status`` against a submodule path,
-#       and that call only resolves when cwd is inside the benchmarks
-#       git worktree.
+#   1. ``benchmarks.utils.version`` computes ``SDK_SHA`` at import time
+#      via ``git submodule status <path>`` — resolves only when cwd is
+#      inside the benchmarks git worktree (the parent of the submodule).
+#   2. ``benchmarks.swebench.build_base_images._get_repo_root`` runs
+#      ``git rev-parse --show-toplevel`` to locate
+#      ``vendor/software-agent-sdk/.../Dockerfile``. chdir into the
+#      submodule (tempting for workspace-root resolution) makes this
+#      call return the SDK tree, doubling the path prefix.
 #
-#   (B) ``_VENDOR_SDK_WORKSPACE_DIR`` — the vendored openhands-sdk UV
-#       workspace root. Required during ``swebench_main()`` because
-#       ``openhands.agent_server.docker.build._default_sdk_project_root``
-#       climbs up from cwd looking for a UV workspace whose
-#       ``[tool.uv.workspace].members`` list flat-named
-#       ``openhands-sdk`` et al. (not ``vendor/.../openhands-sdk``).
-#       The benchmarks repo's own pyproject prefixes members with
-#       ``vendor/software-agent-sdk/``, so its set isn't a superset of
-#       the expected flat names; only the submoduled SDK pyproject
-#       qualifies.
-#
-# Restore the original cwd in a ``finally`` after the runner completes.
+# The UV workspace-root resolution inside
+# ``openhands.agent_server.docker.build._default_sdk_project_root`` is
+# cwd-independent once ``openhands-sdk`` / ``-tools`` / ``-workspace`` /
+# ``-agent-server`` are editable-installed from the vendored SDK —
+# ``__file__``-climb finds the workspace root without relying on cwd.
 _VENDOR_BENCHMARKS_DIR = Path(__file__).resolve().parent.parent / ".vendor" / "benchmarks"
-_VENDOR_SDK_WORKSPACE_DIR = _VENDOR_BENCHMARKS_DIR / "vendor" / "software-agent-sdk"
 
 
 def main() -> None:
@@ -138,17 +132,14 @@ def main() -> None:
     # Forward any extra benchmark-runner flags the caller passed through.
     sys.argv.extend(passthrough)
 
-    # Two-stage chdir — see the module-level comment on
-    # ``_VENDOR_BENCHMARKS_DIR`` and ``_VENDOR_SDK_WORKSPACE_DIR``.
+    # Stay in the benchmarks repo cwd throughout — see module-level
+    # comment on ``_VENDOR_BENCHMARKS_DIR``. Restore the original cwd
+    # after the runner completes.
     original_cwd = os.getcwd()
     os.chdir(_VENDOR_BENCHMARKS_DIR)
     try:
         from benchmarks.swebench.run_infer import main as swebench_main
 
-        # The import has now settled (SDK_SHA computed successfully).
-        # Hop to the SDK UV workspace root so ``_default_sdk_project_root``
-        # finds it via cwd-climb during image build.
-        os.chdir(_VENDOR_SDK_WORKSPACE_DIR)
         swebench_main()
     finally:
         os.chdir(original_cwd)
