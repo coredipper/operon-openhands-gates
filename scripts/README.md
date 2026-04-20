@@ -115,8 +115,8 @@ Two aggregators, pick by whether you've run the SWE-bench patch-evaluation stage
 
 Emits the markdown writeup alongside a JSON artifact whose `summary` block carries two orthogonal retry metrics:
 
-- **Per-instance** (always in [0, 1] — use for headline rate and prose):
-  - `instances_with_rejection` / `instances_with_rejection_rate` — count / fraction of instances with at least one critic rejection (completed or aborted retry).
+- **Per-instance** (counts + a normalized rate; the `_rate` field is always in `[0, 1]`, the counts grow with `n_instances`):
+  - `instances_with_rejection` / `instances_with_rejection_rate` — count / fraction of instances with at least one critic rejection (completed or aborted retry). The rate is the normalized headline number for prose.
   - `instances_with_completed_retry` — subset with `max_attempt > 1`.
   - `aborted_retries` / `aborted_retry_instance_ids` — instances pinned via `--aborted-treatment-retry`.
 - **Per-round** (grows with retry depth — use for cost denominators):
