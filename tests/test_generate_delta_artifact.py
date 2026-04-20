@@ -333,6 +333,87 @@ def test_markdown_renders_pass_at_1_row_and_retry_flip_accounting() -> None:
     assert "❌" in md
 
 
+def test_build_artifact_requires_both_eval_reports_together() -> None:
+    """Roborev #844 Medium 2: supplying only one side would render an
+    asymmetric half-eval markdown. Fail fast instead.
+    """
+    baseline = [_row("a", attempt=1)]
+    treatment = [_row("a", attempt=1)]
+    b_report = _eval_report(resolved=["a"])
+    for k in ("resolved_ids", "unresolved_ids", "empty_patch_ids", "error_ids", "incomplete_ids"):
+        b_report[k] = frozenset(b_report[k])
+    with pytest.raises(ValueError, match="must be supplied together"):
+        gen.build_artifact(
+            baseline,
+            treatment,
+            set(),
+            model="openai/gpt-5",
+            baseline_eval_report=b_report,
+            treatment_eval_report=None,
+        )
+    with pytest.raises(ValueError, match="must be supplied together"):
+        gen.build_artifact(
+            baseline,
+            treatment,
+            set(),
+            model="openai/gpt-5",
+            baseline_eval_report=None,
+            treatment_eval_report=b_report,
+        )
+
+
+def test_build_artifact_rejects_eval_report_missing_row_ids() -> None:
+    """Roborev #844 Medium 1: a mistyped/stale report that doesn't
+    cover every row's instance_id would silently mark rows as
+    ``incomplete`` and skew pass@1. Fail fast.
+    """
+    baseline = [_row("a", attempt=1), _row("b", attempt=1)]
+    treatment = [_row("a", attempt=1), _row("b", attempt=1)]
+    # Treatment report omits "b" entirely — simulates pointing at a
+    # stale/wrong report.
+    b_report = _eval_report(resolved=["a"], unresolved=["b"])
+    t_report = _eval_report(resolved=["a"])  # missing "b"
+    for r in (b_report, t_report):
+        for k in (
+            "resolved_ids",
+            "unresolved_ids",
+            "empty_patch_ids",
+            "error_ids",
+            "incomplete_ids",
+            "submitted_ids",
+            "completed_ids",
+        ):
+            if k in r:
+                r[k] = frozenset(r[k])
+    with pytest.raises(ValueError, match="treatment eval report is missing 1 instance"):
+        gen.build_artifact(
+            baseline,
+            treatment,
+            set(),
+            model="openai/gpt-5",
+            baseline_eval_report=b_report,
+            treatment_eval_report=t_report,
+        )
+
+
+def test_validate_eval_report_accepts_matching_ids() -> None:
+    rows = [_row("a", attempt=1), _row("b", attempt=1)]
+    report = _eval_report(resolved=["a"], unresolved=["b"])
+    for k in (
+        "resolved_ids",
+        "unresolved_ids",
+        "empty_patch_ids",
+        "error_ids",
+        "incomplete_ids",
+        "submitted_ids",
+        "completed_ids",
+    ):
+        if k in report:
+            report[k] = frozenset(report[k])
+    # No exception.
+    gen._validate_eval_report_covers_rows(report, rows, "baseline")
+
+
 def test_markdown_without_eval_report_keeps_old_schema() -> None:
     """Back-compat: when no eval report supplied, pass@1 row + resolved
     columns absent; `resolved` not computed caveat present."""

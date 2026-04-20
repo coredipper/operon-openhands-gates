@@ -128,6 +128,47 @@ def _load_eval_report(path: Path) -> dict:
     return data
 
 
+def _validate_eval_report_covers_rows(
+    report: dict,
+    rows: list[dict],
+    condition_label: str,
+) -> None:
+    """Require every row's ``instance_id`` to appear in the report.
+
+    Roborev #844 Medium 1. A mistyped ``--baseline-eval-report`` /
+    ``--treatment-eval-report`` path, or a stale report from a
+    different slice, would silently mark every uncovered row as
+    ``"incomplete"`` and skew ``pass_at_1`` + resolved counts. Fail
+    fast instead: the report must contain an entry (in ``submitted_ids``
+    or any of the status id sets) for every instance in the run.
+    """
+    covered: frozenset[str] = frozenset().union(
+        *(
+            report.get(k, frozenset())
+            for k in (
+                "submitted_ids",
+                "resolved_ids",
+                "unresolved_ids",
+                "empty_patch_ids",
+                "error_ids",
+                "incomplete_ids",
+                "completed_ids",
+            )
+        )
+    )
+    row_ids = {r["instance_id"] for r in rows}
+    missing = sorted(row_ids - covered)
+    if missing:
+        raise ValueError(
+            f"{condition_label} eval report is missing {len(missing)} "
+            f"instance_id(s) from the {condition_label} run rows: "
+            + ", ".join(missing)
+            + "\n  The report probably points at the wrong run or a stale slice. "
+            "Regenerate via ``benchmarks.swebench.eval_infer`` on the "
+            "matching output.jsonl."
+        )
+
+
 def _eval_status_for(iid: str, report: dict | None) -> str | None:
     """Classify an instance against the eval report.
 
@@ -318,6 +359,26 @@ def build_artifact(
 
     _validate_aborted_retries(treatment_rows, aborted_treatment_retries)
 
+    # Roborev #844 Medium 2: eval reports must be supplied as a pair.
+    # A one-sided artifact (baseline scored, treatment not — or vice
+    # versa) would render the markdown in a broken half-state because
+    # the ``has_eval`` check keys off one side. Fail fast instead.
+    if (baseline_eval_report is None) != (treatment_eval_report is None):
+        raise ValueError(
+            "--baseline-eval-report and --treatment-eval-report must be "
+            "supplied together (or neither). Got "
+            f"baseline={'set' if baseline_eval_report else 'unset'}, "
+            f"treatment={'set' if treatment_eval_report else 'unset'}."
+        )
+
+    # Roborev #844 Medium 1: validate eval reports cover every row's
+    # instance_id. A mistyped/stale report would silently mark
+    # uncovered rows as "incomplete" and skew pass@1.
+    if baseline_eval_report is not None:
+        _validate_eval_report_covers_rows(baseline_eval_report, baseline_rows, "baseline")
+    if treatment_eval_report is not None:
+        _validate_eval_report_covers_rows(treatment_eval_report, treatment_rows, "treatment")
+
     by_base = _by_instance(baseline_rows)
     by_treat = _by_instance(treatment_rows)
 
@@ -401,7 +462,11 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
     dominant_repo = repo_sorted[0][0] if repo_sorted else "unknown"
 
     # Whether the eval step was run (affects columns + prose).
-    has_eval = bs.get("pass_at_1") is not None or "resolved_count" in bs
+    # ``build_artifact`` enforces that eval reports are paired, but
+    # the markdown renderer checks both sides defensively — if one is
+    # missing, it falls back to the infer-only layout rather than
+    # rendering an asymmetric half-eval view (roborev #844 Medium 2).
+    has_eval = "resolved_count" in bs and "resolved_count" in ts
 
     def _status_emoji(status: str | None) -> str:
         if status is None:
