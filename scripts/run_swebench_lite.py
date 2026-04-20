@@ -58,6 +58,50 @@ import register_critic  # noqa: F401 — load for side effect
 _VENDOR_BENCHMARKS_DIR = Path(__file__).resolve().parent.parent / ".vendor" / "benchmarks"
 
 
+# Flag-name suffixes that indicate a path-bearing argument. A forwarded
+# passthrough flag whose name (before any ``=``) ends with one of these
+# suffixes is treated as carrying a filesystem path whose value must be
+# resolved against the caller's cwd before the wrapper chdirs into the
+# vendor benchmarks clone.
+_PATH_SUFFIXES = ("-path", "-file", "-dir", "-config")
+
+
+def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> list[str]:
+    """Normalize path-bearing passthrough args against ``original_cwd``.
+
+    Looks for flags whose name ends with one of :data:`_PATH_SUFFIXES`
+    (``--prompt-path``, ``--some-config``, etc.) in either
+    ``--flag value`` or ``--flag=value`` form. Resolves the value
+    against ``original_cwd`` so a user passing ``--prompt-path ../x.j2``
+    ends up pointing at ``original_cwd/../x.j2``, not
+    ``.vendor/benchmarks/../x.j2`` after the wrapper's chdir.
+
+    Unknown flags pass through untouched. Trailing path-flags with no
+    value pass through as-is so the downstream parser produces a
+    clear error. Matching uses exact suffix anchors, not substring —
+    ``--pathwise`` is not treated as a path flag.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(passthrough):
+        tok = passthrough[i]
+        if tok.startswith("--") and any(tok.split("=", 1)[0].endswith(s) for s in _PATH_SUFFIXES):
+            if "=" in tok:
+                flag, value = tok.split("=", 1)
+                out.append(f"{flag}={(original_cwd / value).resolve()}")
+            elif i + 1 < len(passthrough):
+                flag = tok
+                value = passthrough[i + 1]
+                out.extend([flag, str((original_cwd / value).resolve())])
+                i += 1  # skip the value token on next iteration
+            else:
+                out.append(tok)
+        else:
+            out.append(tok)
+        i += 1
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -78,7 +122,10 @@ def main() -> None:
         help=(
             "Path to the OpenHands LLM config JSON "
             "(see https://docs.openhands.dev/sdk/llm). "
-            "Must at minimum set ``model`` and ``api_key``."
+            "Must at minimum set ``model``; ``api_key`` is optional and "
+            "typically omitted — LiteLLM reads the provider's API key "
+            "from the environment (e.g. ``ANTHROPIC_API_KEY``, "
+            "``OPENAI_API_KEY``). Export the relevant key before running."
         ),
     )
     parser.add_argument(
@@ -129,20 +176,23 @@ def main() -> None:
     ]
     if args.n_limit is not None:
         sys.argv.extend(["--n-limit", str(args.n_limit)])
-    # Forward any extra benchmark-runner flags the caller passed through.
-    sys.argv.extend(passthrough)
+
+    # Normalize path-bearing passthrough flags (``--prompt-path``, etc.)
+    # against the caller's original cwd *before* chdir — see
+    # :func:`_normalize_path_passthrough` for the matching contract.
+    original_cwd = Path.cwd()
+    sys.argv.extend(_normalize_path_passthrough(passthrough, original_cwd))
 
     # Stay in the benchmarks repo cwd throughout — see module-level
     # comment on ``_VENDOR_BENCHMARKS_DIR``. Restore the original cwd
     # after the runner completes.
-    original_cwd = os.getcwd()
     os.chdir(_VENDOR_BENCHMARKS_DIR)
     try:
         from benchmarks.swebench.run_infer import main as swebench_main
 
         swebench_main()
     finally:
-        os.chdir(original_cwd)
+        os.chdir(str(original_cwd))
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ Two-condition experiment: OpenHands `CodeActAgent` with the default `AgentFinish
 
 - Python 3.12+
 - Docker (local daemon, used by the benchmarks runner's `--workspace docker`)
-- Anthropic API key (or OpenAI / other, set in the LLM config JSON)
+- Anthropic API key (or OpenAI / other) exported as an environment variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) — the LLM config JSON does not carry the secret; LiteLLM reads it from env
 - A separate venv for the experiment — the benchmarks repo pulls in `modal`, `commit0`, `swebench==4.1.0`, `docker`, etc. Don't pollute the dev venv.
 
 ## One-time setup
