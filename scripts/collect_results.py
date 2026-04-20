@@ -163,7 +163,6 @@ def _aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
     errors = sum(1 for r in results if r["eval_status"] == "error")
     not_eval = sum(1 for r in results if r["eval_status"] == "not_evaluated")
     n = len(results)
-    pass_at_1 = resolved / n if n else 0.0
     mean_turns = sum(r["n_turns"] for r in results) / n if n else 0.0
     total_tokens = sum(r["total_tokens"] or 0 for r in results)
     summary: dict[str, Any] = {
@@ -173,12 +172,33 @@ def _aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
         "empty_patch": empty,
         "error": errors,
         "not_evaluated": not_eval,
-        "pass_at_1": round(pass_at_1, 4),
         "mean_turns": round(mean_turns, 2),
         "total_tokens": total_tokens,
     }
+    # ``pass_at_1`` requires the SWE-bench patch-evaluation step to have
+    # populated ``test_result.resolved`` on every row. If any row is
+    # still ``not_evaluated``, emit ``null`` instead of a divide-by-n
+    # that silently reports 0.0 — roborev #836 Medium: an unevaluated
+    # run should not be presented as a real pass@1 of 0. Callers that
+    # want to force-compute anyway should run eval first.
+    if not_eval > 0:
+        summary["pass_at_1"] = None
+        summary["pass_at_1_note"] = (
+            f"SWE-bench patch-evaluation not run ({not_eval}/{n} rows "
+            "have ``resolved: None``); treat as unknown, not 0."
+        )
+    else:
+        summary["pass_at_1"] = round(resolved / n, 4) if n else 0.0
     # Certificate rollup is treatment-only; present only when the rows
-    # actually carry the key.
+    # actually carry the key. NOTE: the underlying
+    # ``OperonStagnationCritic.metadata`` is currently NOT serialized
+    # by the openhands-sdk into ``history`` events — see
+    # ``eval/results/swebench_lite_delta.md`` caveat 3. Until that gap
+    # is closed (SDK patch or side-channel log), ``_scan_certificate``
+    # will return ``None`` for every real run and this rollup reports
+    # 0. Useful for unit tests (which inject synthetic history), not
+    # for real treatment runs — use ``scripts/generate_delta_artifact.py``
+    # for those, which infers critic firing from Attempt-2 retries.
     if results and "certificate_emitted" in results[0]:
         summary["certificates_emitted"] = sum(1 for r in results if r.get("certificate_emitted"))
     return summary

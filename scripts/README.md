@@ -89,6 +89,10 @@ Expected: one resolved (or unresolved — the point isn't pass@1, it's that the 
 
 ## Aggregate
 
+Two aggregators, pick by whether you've run the SWE-bench patch-evaluation stage:
+
+**`collect_results.py`** — for the full pass@1 comparison (requires `test_result.resolved` populated via a separate SWE-bench eval invocation that's not wired into this harness yet):
+
 ```bash
 .venv-experiment/bin/python scripts/collect_results.py \
   --baseline eval/runs/baseline \
@@ -96,7 +100,24 @@ Expected: one resolved (or unresolved — the point isn't pass@1, it's that the 
   --out eval/results/swebench_lite_delta.json
 ```
 
-Produces an artifact whose `summary` block reports `pass_at_1`, `mean_turns`, `total_tokens` per condition. Commit the artifact + a short `swebench_lite_delta.md` interpretation alongside.
+`summary` reports `pass_at_1`, `mean_turns`, `total_tokens` per condition. **If eval wasn't run, `pass_at_1` emits as `null` with an explanatory `pass_at_1_note`** — don't treat a missing eval step as a 0.0 pass rate.
+
+**`generate_delta_artifact.py`** — for infer-only runs (what this repo produces today) where the behavioral delta you care about is the critic-retry pattern, not pass@1:
+
+```bash
+.venv-experiment/bin/python scripts/generate_delta_artifact.py \
+  --baseline eval/runs/baseline \
+  --treatment eval/runs/treatment \
+  --aborted-treatment-retry django__django-11019 \
+  --out-json eval/results/swebench_lite_delta.json \
+  --out-md eval/results/swebench_lite_delta.md
+```
+
+Emits per-instance cost + attempt counts, `critic_rejections` (completed + aborted), per-completed-retry cost, and the markdown writeup in one pass. `--aborted-treatment-retry` is repeatable and marks instances whose treatment Attempt-2 started but didn't complete (timeout etc.); the script surfaces them in the headline retry count without biasing the per-retry cost figure.
+
+### Note on certificate fields
+
+`collect_results.py`'s `certificates_emitted` rollup relies on `_scan_certificate` walking the serialized event history for `certificate_theorem`. **The openhands-sdk currently does NOT serialize `CriticResult.metadata` into `MessageEvent` / `ActionEvent` records** — the field comes back as `null`. Until that gap is closed (SDK patch or side-channel log from `OperonStagnationCritic.evaluate()`), the rollup will report 0 for every real run even when the critic fired. `generate_delta_artifact.py` sidesteps this by inferring critic firings from Attempt-2 presence + the `--aborted-treatment-retry` list. See `eval/results/swebench_lite_delta.md` caveat 3.
 
 ## Overrides
 

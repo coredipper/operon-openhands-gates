@@ -1,6 +1,6 @@
 # SWE-bench-lite delta: baseline vs OperonStagnationCritic
 
-**Scope:** n=10, OpenAI GPT-5, SWE-bench-lite `test` split, local Docker workspace on Apple Silicon.
+**Scope:** n=10, openai/gpt-5, SWE-bench-lite `test` split, local Docker workspace on Apple Silicon.
 **Conditions:**
 - `baseline`: OpenHands `CodeActAgent` + default `AgentFinishedCritic` (finish_with_patch preset).
 - `operon_stagnation`: same agent + `OperonStagnationCritic(threshold=0.2, window=10, critical_duration=3)`.
@@ -18,19 +18,19 @@
 | Mean final patch length (chars) |     1839 |              1712 | — |
 | Mean final history events       |     80.3 |              80.6 | — |
 
-Per-rejection budget overhead: **$0.40** (= total cost delta / critic_rejections).
+Per-rejection budget overhead: **$0.47** per completed retry (= total cost delta / completed_retries; aborted retries excluded to avoid bias from undercounted spend).
 
-**Raw artifact:** [`swebench_lite_delta.json`](./swebench_lite_delta.json).
+**Raw artifact:** [`swebench_lite_delta.json`](./swebench_lite_delta.json). Reproduce via `scripts/generate_delta_artifact.py`.
 
 ## What the critic did
 
-On the 10-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected 6 of 10 first-attempt patches (60%): 5 triggered a second refinement iteration that completed, and 1 triggered a retry that timed out before completing (`django__django-11019` — 60-min per-attempt ceiling).
+On the 10-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected 6 of 10 first-attempt patches (60%): 5 triggered a second refinement iteration that completed, and 1 triggered a retry that timed out before completing.
 
 That's a **measurable behavioral delta** — the structural critic reaches different "done" decisions than an LLM-judged critic on the same agent trajectories. The cost is a **+56% budget overhead** for the slice. Whether retries *improve* correctness against the gold fix is not measured here; see caveats.
 
 ## Instance-level table
 
-All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delta.json) `per_instance[*]` (roborev #834).
+All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delta.json) `per_instance[*]`.
 
 | Instance | Baseline attempts | Treatment attempts | Baseline cost | Treatment cost |
 |----------|------------------:|-------------------:|--------------:|---------------:|
@@ -53,27 +53,27 @@ All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delt
 
 2. **`resolved` not computed.** Both conditions produced non-empty `git_patch` outputs, but the SWE-bench patch-evaluation step (which applies patches and runs `FAIL_TO_PASS` / `PASS_TO_PASS` tests) was not run. The critic-retry delta is a behavioral signal; the underlying pass@1 comparison requires the evaluation pipeline.
 
-3. **Certificate metadata not serialized.** `OperonStagnationCritic` emits `CriticResult.metadata` with `certificate_theorem="behavioral_stability_windowed"` on stagnation fires. That metadata field is **not captured** in the serialized event history (`critic_result` field on `MessageEvent` / `ActionEvent` is `null` throughout). Known openhands-sdk serialization gap, not a critic bug. Critic firing is inferred from Attempt-2 presence (for completed retries) or from the pinned aborted-retry list (for the timed-out one), not from on-disk certificate records. Fixing this requires either patching the SDK or adding a side-channel log from inside `OperonStagnationCritic.evaluate()`.
+3. **Certificate metadata not serialized.** `OperonStagnationCritic` emits `CriticResult.metadata` with `certificate_theorem="behavioral_stability_windowed"` on stagnation fires. That metadata field is **not captured** in the serialized event history (`critic_result` field on `MessageEvent` / `ActionEvent` is `null` throughout). Known openhands-sdk serialization gap, not a critic bug. Critic firing is inferred from Attempt-2 presence (for completed retries) or from the pinned aborted-retry list (for timed-out ones), not from on-disk certificate records. Fixing this requires either patching the SDK or adding a side-channel log from inside `OperonStagnationCritic.evaluate()`.
 
-4. **`django__django-11019` Attempt-2 timeout.** The critic rejected Attempt-1 and triggered retry. The retry ran 38+ minutes and hit the per-attempt 60-min ceiling. The run was killed to avoid a multi-hour retry cascade. Counted as a critic rejection in the headline rate (`aborted_retries: 1`), but no Attempt-2 row exists in `output.jsonl` — its cumulative cost row undercounts what a clean retry would have produced.
+4. **Aborted retries (1).** Critic rejected Attempt-1 for `django__django-11019`, triggered Attempt-2 that hit the 60-min per-attempt ceiling and was killed. Counted as critic rejection(s) in the headline rate (`aborted_retries: 1`), but no Attempt-2 row exists in `output.jsonl` — their cumulative cost figures undercount what a clean retry would have produced. The per-retry cost figure excludes them from the denominator for this reason.
 
-5. **Single model (GPT-5).** Paper 4's `threshold=0.2` epiplexic-integral cutoff was validated on different model families (sentence-MiniLM embeddings at n=300 trials). Behavior on GPT-5 trajectories may have different stagnation dynamics than the validation set.
+5. **Single model.** Paper 4's `threshold=0.2` epiplexic-integral cutoff was validated on different model families (sentence-MiniLM embeddings at n=300 trials). Behavior on the experiment model's trajectories may have different stagnation dynamics than the validation set.
 
 ## What this does and does not prove
 
 **Does:**
 - The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances.
 - The structural critic exhibits a measurably different rejection pattern from the default LLM critic (60% vs 0%).
-- Retries cost roughly **$0.40 per rejected instance**, rolling up to a **+56% overall overhead** at this slice.
+- Per-completed-retry overhead: **$0.47** per completed retry (= total cost delta / completed_retries; aborted retries excluded to avoid bias from undercounted spend). Full-slice overhead: **+56%**.
 
 **Does not:**
 - Establish whether retries improve patch correctness — that needs the SWE-bench evaluation step.
-- Generalize beyond django-heavy instances on GPT-5.
+- Generalize beyond the selection-biased instance subset (see caveat 1).
 - Provide on-disk certificate evidence (openhands-sdk serialization gap; pending follow-up).
 
 ## Next steps
 
 1. **Run SWE-bench evaluation** on both `output.jsonl` files to compute per-condition pass@1, resolved counts, `FAIL_TO_PASS` breakdown. This is the number the plan's success criteria calls for.
-2. **Fix the certificate-metadata serialization** so `scripts/collect_results.py`'s `_scan_certificate` can populate `certificate_emitted`, `certificate_theorem`, `cert_evidence_n` without relying on the retry-count proxy.
+2. **Fix the certificate-metadata serialization** so downstream consumers can populate `certificate_emitted`, `certificate_theorem`, `cert_evidence_n` without relying on the retry-count proxy.
 3. **Rerun on a Linux host or `--workspace remote`** to get an unbiased 30-instance slice.
 4. **Broader scope:** once the harness is stable, repeat on Claude Sonnet 4.6 (original plan default) and on SWE-bench-Verified.

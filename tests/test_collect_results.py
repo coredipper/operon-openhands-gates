@@ -269,3 +269,44 @@ def test_summary_includes_certificate_rollup_on_treatment_only() -> None:
     artifact = collect_results.build_artifact(baseline, treatment)
     assert "certificates_emitted" not in artifact["summary"]["baseline"]
     assert artifact["summary"]["operon_stagnation"]["certificates_emitted"] == 1
+
+
+# ---- Roborev #836 Medium: nullable pass_at_1 on unevaluated runs -----------
+
+
+def test_pass_at_1_is_null_when_resolved_missing_on_any_row() -> None:
+    """Roborev #836 Medium: if SWE-bench patch-evaluation step hasn't
+    run, ``test_result.resolved`` is None on every row and the old
+    ``resolved / n`` math silently reports 0.0 — presenting an
+    unevaluated run as a real 0 pass rate. Summary must emit ``None``
+    with an explanatory note instead.
+    """
+    baseline = [_record("a", resolved=None), _record("b", resolved=None)]
+    treatment = [_record("a", resolved=None), _record("b", resolved=None)]
+    artifact = collect_results.build_artifact(baseline, treatment)
+    assert artifact["summary"]["baseline"]["pass_at_1"] is None
+    assert "pass_at_1_note" in artifact["summary"]["baseline"]
+    assert artifact["summary"]["operon_stagnation"]["pass_at_1"] is None
+
+
+def test_pass_at_1_is_null_when_subset_of_rows_unevaluated() -> None:
+    """Partial eval (some rows scored, others not) also triggers None —
+    the headline metric would otherwise understate pass rate by
+    counting unscored rows as failures.
+    """
+    baseline = [_record("a", resolved=True), _record("b", resolved=None)]
+    treatment = [_record("a", resolved=True), _record("b", resolved=True)]
+    artifact = collect_results.build_artifact(baseline, treatment)
+    assert artifact["summary"]["baseline"]["pass_at_1"] is None
+    assert artifact["summary"]["baseline"]["not_evaluated"] == 1
+    # Treatment has all rows scored, so pass_at_1 is numeric.
+    assert artifact["summary"]["operon_stagnation"]["pass_at_1"] == 1.0
+
+
+def test_pass_at_1_is_numeric_when_all_rows_evaluated() -> None:
+    """Happy path: both sides have resolved set. Note absent."""
+    baseline = [_record("a", resolved=True), _record("b", resolved=False)]
+    treatment = [_record("a", resolved=True), _record("b", resolved=True)]
+    artifact = collect_results.build_artifact(baseline, treatment)
+    assert artifact["summary"]["baseline"]["pass_at_1"] == 0.5
+    assert "pass_at_1_note" not in artifact["summary"]["baseline"]
