@@ -170,6 +170,20 @@ def test_path_flag_followed_by_dash_letter_equals_is_normalized(
     assert out[1] == str((tmp_path / "-n=5").resolve())
 
 
+def test_path_flag_followed_by_short_help_with_equals_is_normalized(
+    tmp_path: Path,
+) -> None:
+    """Roborev #826 Medium: ``-h=1`` is NOT argparse's built-in help
+    (which takes no value) — it's a weird dash-prefixed filename and
+    should be cwd-normalized, not left as-is. Only bare ``-h``
+    matches the known-short-flag set now.
+    """
+    (tmp_path / "-h=1").write_text("")
+    out = normalize(["--prompt-path", "-h=1"], tmp_path)
+    assert out[0] == "--prompt-path"
+    assert out[1] == str((tmp_path / "-h=1").resolve())
+
+
 def test_is_usable_api_key_rejects_redacted_and_whitespace() -> None:
     """Roborev #823 Low: the downstream LLM loader treats
     ``""``, ``"   "``, and ``"**********"`` (Pydantic SecretStr mask)
@@ -227,9 +241,12 @@ def test_looks_like_flag_heuristic() -> None:
     # long options always count
     assert wrapper._looks_like_flag("--foo") is True
     assert wrapper._looks_like_flag("--foo=bar") is True
-    # known short options (argparse's built-in --help alias)
+    # bare known short option — argparse's built-in --help alias
     assert wrapper._looks_like_flag("-h") is True
-    assert wrapper._looks_like_flag("-h=1") is True
+    # ``-h=value`` is NOT a flag — argparse's ``-h`` takes no value,
+    # so ``-h=1`` is a (weird) dash-prefixed filename (roborev #826).
+    assert wrapper._looks_like_flag("-h=1") is False
+    assert wrapper._looks_like_flag("-h=foo.json") is False
     # single-letter dash tokens NOT in _KNOWN_SHORT_FLAGS are values:
     assert wrapper._looks_like_flag("-v") is False
     assert wrapper._looks_like_flag("-a") is False

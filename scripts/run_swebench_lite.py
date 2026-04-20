@@ -183,19 +183,15 @@ def _looks_like_flag(tok: str) -> bool:
     """True iff ``tok`` is plausibly an option flag.
 
     Long options (``--foo``, ``--foo=bar``) always count. Single-dash
-    tokens count only if they are listed in :data:`_KNOWN_SHORT_FLAGS`
-    — keeping the known-short-flag set narrow prevents misclassifying
-    legitimate dash-prefixed filenames (``-a.py``, ``-v.json``,
-    ``-3.14``) as flags (roborev #824 feedback). Unknown dash-prefixed
-    tokens are treated as values and normalized against the caller's
-    cwd, which is the behavior dash-prefixed filenames need.
+    tokens count only if the *whole token* exactly matches a member of
+    :data:`_KNOWN_SHORT_FLAGS` — bare ``-h`` counts, but ``-h=1`` does
+    not, because argparse's built-in ``-h`` takes no value, so
+    ``-h=1`` is actually a (weird) dash-prefixed filename that should
+    be cwd-normalized (roborev #826).
     """
     if tok.startswith("--"):
         return True
-    # Strip ``=value`` suffix before set membership check so ``-h=1``
-    # (rare but theoretically valid) still counts as a flag.
-    flag_name = tok.split("=", 1)[0]
-    return flag_name in _KNOWN_SHORT_FLAGS
+    return tok in _KNOWN_SHORT_FLAGS
 
 
 def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> list[str]:
