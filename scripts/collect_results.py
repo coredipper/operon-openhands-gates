@@ -38,12 +38,11 @@ from typing import Any, cast
 # false positives.
 _CERTIFICATE_KEY = "certificate_theorem"
 _CERTIFICATE_SOURCE_KEY = "certificate_source"
-# Optional evidence-count key the runner may propagate alongside the
-# theorem name. If present we preserve it on the row; if absent we leave
-# ``cert_evidence_n`` as ``None`` rather than dropping the field — the
-# artifact schema always carries the key so downstream consumers can
-# key on it without probing.
-_CERTIFICATE_EVIDENCE_N_KEYS = ("cert_evidence_n", "n", "evidence_n")
+# Key the critic writes into CriticResult.metadata alongside the theorem
+# name; equals ``critical_duration`` by construction. Kept as a constant
+# so the collector and the critic agree on the contract and a single
+# string-rename lands in one place on both sides.
+_CERTIFICATE_EVIDENCE_N_KEY = "cert_evidence_n"
 
 
 def _find_output_jsonl(run_dir: Path) -> Path:
@@ -132,25 +131,12 @@ def _extract_result(record: dict[str, Any], condition: str) -> dict[str, Any]:
         if cert is not None:
             out["certificate_theorem"] = cert.get(_CERTIFICATE_KEY)
             out["certificate_source"] = cert.get(_CERTIFICATE_SOURCE_KEY)
-            out["cert_evidence_n"] = _first_present(cert, _CERTIFICATE_EVIDENCE_N_KEYS)
+            out["cert_evidence_n"] = cert.get(_CERTIFICATE_EVIDENCE_N_KEY)
         else:
             out["certificate_theorem"] = None
             out["certificate_source"] = None
             out["cert_evidence_n"] = None
     return out
-
-
-def _first_present(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
-    """Return the first value among ``keys`` that's set in ``mapping``.
-
-    Used to accommodate runner-version drift in the field name the
-    benchmarks runner uses to expose the certificate's evidence window
-    length — we don't know the exact key yet, so probe a small set.
-    """
-    for k in keys:
-        if k in mapping:
-            return mapping[k]
-    return None
 
 
 def _infer_eval_status(record: dict[str, Any], patch: str, test_result: dict[str, Any]) -> str:

@@ -177,22 +177,53 @@ def test_scan_certificate_finds_key_in_deeply_nested_structures() -> None:
     assert hit["certificate_theorem"] == "x"
 
 
-def test_extract_result_populates_certificate_fields_for_treatment() -> None:
-    history = [
-        {"kind": "MessageEvent"},
-        {
-            "metadata": {
-                "certificate_theorem": "behavioral_stability_windowed",
-                "certificate_source": "src",
-                "cert_evidence_n": 3,
-            }
+def _critic_event(
+    theorem: str = "behavioral_stability_windowed",
+    source: str = "operon_openhands_gates.stagnation_critic",
+    cert_evidence_n: int | None = 3,
+) -> dict:
+    """History-event fixture that mirrors the real serialized CriticResult.
+
+    ``OperonStagnationCritic`` writes ``certificate_theorem``,
+    ``certificate_source``, and ``cert_evidence_n`` into
+    ``CriticResult.metadata``. The benchmarks runner persists
+    ``CriticResult`` records inside ``EvalOutput.history`` entries.
+    ``_scan_certificate`` recursively finds the metadata dict, so the
+    exact event wrapper shape doesn't matter — but the fixture mirrors
+    the end-to-end structure (wrapper → critic_result → metadata)
+    rather than inlining the metadata dict at the top level.
+    """
+    metadata: dict = {
+        "severity": 0.85,
+        "certificate_theorem": theorem,
+        "certificate_source": source,
+    }
+    if cert_evidence_n is not None:
+        metadata["cert_evidence_n"] = cert_evidence_n
+    return {
+        "kind": "AgentActionEvent",
+        "source": "agent",
+        "critic_result": {
+            "score": 0.15,
+            "message": "epiplexic_integral=0.150 threshold=0.2 streak=3 STAGNANT",
+            "metadata": metadata,
         },
-    ]
+    }
+
+
+def test_extract_result_populates_certificate_fields_for_treatment() -> None:
+    """Regression for roborev #813 Medium: fixture mirrors real
+    serialized history (wrapper event → ``critic_result`` → nested
+    ``metadata``) rather than flattening the metadata dict at the top
+    level. The recursive scan finds the certificate fields and the
+    ``cert_evidence_n`` value the critic now emits into metadata.
+    """
+    history = [{"kind": "MessageEvent"}, _critic_event(cert_evidence_n=3)]
     record = _record("a", history=history)
     out = collect_results._extract_result(record, "operon_stagnation")
     assert out["certificate_emitted"] is True
     assert out["certificate_theorem"] == "behavioral_stability_windowed"
-    assert out["certificate_source"] == "src"
+    assert out["certificate_source"] == "operon_openhands_gates.stagnation_critic"
     assert out["cert_evidence_n"] == 3
 
 
@@ -207,15 +238,17 @@ def test_extract_result_certificate_emitted_false_when_absent() -> None:
     assert out["cert_evidence_n"] is None
 
 
-def test_extract_result_cert_evidence_n_tolerates_field_rename() -> None:
-    """Roborev #812 Low: the runner may expose the evidence-window
-    length under ``cert_evidence_n``, ``n``, or ``evidence_n``
-    depending on version. Probe a small set; first match wins.
+def test_extract_result_cert_evidence_n_none_when_runner_omits_field() -> None:
+    """Roborev #813 Medium: older benchmarks versions (or a stripped
+    metadata dict) may not carry ``cert_evidence_n``. Row still carries
+    the key with ``None`` so downstream consumers can key on it without
+    probing. ``certificate_emitted`` still flips True because the
+    theorem name is present.
     """
-    # Plain ``n`` fallback (what operon-core's verify evidence uses).
-    history = [{"metadata": {"certificate_theorem": "x", "n": 5}}]
+    history = [_critic_event(cert_evidence_n=None)]
     out = collect_results._extract_result(_record("a", history=history), "operon_stagnation")
-    assert out["cert_evidence_n"] == 5
+    assert out["certificate_emitted"] is True
+    assert out["cert_evidence_n"] is None
 
 
 def test_extract_result_omits_certificate_fields_on_baseline() -> None:

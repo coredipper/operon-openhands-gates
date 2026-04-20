@@ -187,6 +187,14 @@ class OperonStagnationCritic(CriticBase):
         if self._certificate is not None:
             metadata["certificate_theorem"] = self._certificate.theorem
             metadata["certificate_source"] = self._certificate.source
+            # Carry the evidence-window length alongside the theorem/source
+            # so downstream artifact collectors (e.g.
+            # operon-openhands-gates/scripts/collect_results.py) don't have
+            # to reconstruct it from the certificate's parameters. Equals
+            # ``self.critical_duration`` by construction (the cert is built
+            # from exactly that many violating rolling-window means).
+            signal_values = self._certificate.parameters.get("signal_values", ())
+            metadata["cert_evidence_n"] = len(signal_values)
         return CriticResult(
             score=integral,
             message=(
