@@ -76,10 +76,29 @@ def test_build_artifact_requires_no_missing_instance_ids() -> None:
         collect_results.build_artifact(baseline, treatment)
 
 
-def test_build_artifact_rejects_duplicate_rows_same_id_set() -> None:
-    baseline = [_record("a"), _record("a")]  # duplicate
+def test_build_artifact_rejects_duplicate_rows_within_baseline() -> None:
+    baseline = [_record("a"), _record("a")]  # duplicate in baseline
     treatment = [_record("a")]
-    with pytest.raises(ValueError, match="row-count mismatch"):
+    with pytest.raises(ValueError, match="duplicate instance_id.*in baseline"):
+        collect_results.build_artifact(baseline, treatment)
+
+
+def test_build_artifact_rejects_mirror_duplicates_with_matching_sets() -> None:
+    """Roborev #812 Medium: ``baseline=[a,a,b]`` vs ``treatment=[a,b,b]``
+    has the same id set ``{a,b}`` and same length ``3``, but each side
+    has a duplicate. Previously passed validation and silently
+    double-counted. Must now error, naming the condition.
+    """
+    baseline = [_record("a"), _record("a"), _record("b")]
+    treatment = [_record("a"), _record("b"), _record("b")]
+    with pytest.raises(ValueError, match="duplicate instance_id.*in baseline"):
+        collect_results.build_artifact(baseline, treatment)
+
+
+def test_build_artifact_rejects_duplicate_rows_within_treatment() -> None:
+    baseline = [_record("a"), _record("b")]
+    treatment = [_record("a"), _record("b"), _record("b")]
+    with pytest.raises(ValueError, match="duplicate instance_id.*in treatment"):
         collect_results.build_artifact(baseline, treatment)
 
 
@@ -165,6 +184,7 @@ def test_extract_result_populates_certificate_fields_for_treatment() -> None:
             "metadata": {
                 "certificate_theorem": "behavioral_stability_windowed",
                 "certificate_source": "src",
+                "cert_evidence_n": 3,
             }
         },
     ]
@@ -173,6 +193,7 @@ def test_extract_result_populates_certificate_fields_for_treatment() -> None:
     assert out["certificate_emitted"] is True
     assert out["certificate_theorem"] == "behavioral_stability_windowed"
     assert out["certificate_source"] == "src"
+    assert out["cert_evidence_n"] == 3
 
 
 def test_extract_result_certificate_emitted_false_when_absent() -> None:
@@ -180,6 +201,21 @@ def test_extract_result_certificate_emitted_false_when_absent() -> None:
     out = collect_results._extract_result(record, "operon_stagnation")
     assert out["certificate_emitted"] is False
     assert out["certificate_theorem"] is None
+    # cert_evidence_n is a documented schema field; it stays present on
+    # the row even when the critic didn't fire (value ``None``) so
+    # downstream consumers can key on it without probing.
+    assert out["cert_evidence_n"] is None
+
+
+def test_extract_result_cert_evidence_n_tolerates_field_rename() -> None:
+    """Roborev #812 Low: the runner may expose the evidence-window
+    length under ``cert_evidence_n``, ``n``, or ``evidence_n``
+    depending on version. Probe a small set; first match wins.
+    """
+    # Plain ``n`` fallback (what operon-core's verify evidence uses).
+    history = [{"metadata": {"certificate_theorem": "x", "n": 5}}]
+    out = collect_results._extract_result(_record("a", history=history), "operon_stagnation")
+    assert out["cert_evidence_n"] == 5
 
 
 def test_extract_result_omits_certificate_fields_on_baseline() -> None:

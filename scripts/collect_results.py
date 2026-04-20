@@ -38,6 +38,12 @@ from typing import Any, cast
 # false positives.
 _CERTIFICATE_KEY = "certificate_theorem"
 _CERTIFICATE_SOURCE_KEY = "certificate_source"
+# Optional evidence-count key the runner may propagate alongside the
+# theorem name. If present we preserve it on the row; if absent we leave
+# ``cert_evidence_n`` as ``None`` rather than dropping the field — the
+# artifact schema always carries the key so downstream consumers can
+# key on it without probing.
+_CERTIFICATE_EVIDENCE_N_KEYS = ("cert_evidence_n", "n", "evidence_n")
 
 
 def _find_output_jsonl(run_dir: Path) -> Path:
@@ -126,10 +132,25 @@ def _extract_result(record: dict[str, Any], condition: str) -> dict[str, Any]:
         if cert is not None:
             out["certificate_theorem"] = cert.get(_CERTIFICATE_KEY)
             out["certificate_source"] = cert.get(_CERTIFICATE_SOURCE_KEY)
+            out["cert_evidence_n"] = _first_present(cert, _CERTIFICATE_EVIDENCE_N_KEYS)
         else:
             out["certificate_theorem"] = None
             out["certificate_source"] = None
+            out["cert_evidence_n"] = None
     return out
+
+
+def _first_present(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    """Return the first value among ``keys`` that's set in ``mapping``.
+
+    Used to accommodate runner-version drift in the field name the
+    benchmarks runner uses to expose the certificate's evidence window
+    length — we don't know the exact key yet, so probe a small set.
+    """
+    for k in keys:
+        if k in mapping:
+            return mapping[k]
+    return None
 
 
 def _infer_eval_status(record: dict[str, Any], patch: str, test_result: dict[str, Any]) -> str:
@@ -186,7 +207,16 @@ def _validate_matched_instances(
     A partial run, wrong ``--select``, or shard failure should fail
     loudly — a summary that silently compares different task sets is
     worse than no summary. Reports missing/extra IDs on either side.
+
+    Also rejects duplicate ``instance_id`` rows within either condition
+    independently: ``baseline=[a,a,b]`` vs ``treatment=[a,b,b]`` would
+    pass a set/length comparison but double-count instances in the
+    aggregates. Per-condition uniqueness is checked first so the failure
+    names the offending condition + duplicate IDs.
     """
+    _reject_duplicates("baseline", baseline)
+    _reject_duplicates("treatment", treatment)
+
     bids_raw = {r.get("instance_id") for r in baseline}
     tids_raw = {r.get("instance_id") for r in treatment}
     if None in bids_raw or None in tids_raw:
@@ -207,13 +237,27 @@ def _validate_matched_instances(
             lines.append(f"  missing in baseline ({len(missing_in_baseline)}):")
             lines.extend(f"    {i}" for i in missing_in_baseline)
         raise ValueError("\n".join(lines))
-    if len(baseline) != len(treatment):
-        # Same IDs but different row counts implies a condition has
-        # duplicate records. Not recoverable without caller intent.
-        raise ValueError(
-            f"row-count mismatch: baseline={len(baseline)}, treatment={len(treatment)} "
-            f"(same instance_id set; one side has duplicates)"
-        )
+
+
+def _reject_duplicates(condition: str, records: list[dict[str, Any]]) -> None:
+    """Fail if any ``instance_id`` appears more than once in ``records``.
+
+    The per-condition check runs *before* the cross-condition set
+    comparison so the error names the offending condition rather than
+    a generic "row-count mismatch" that could leave the user guessing
+    which side to inspect.
+    """
+    from collections import Counter
+
+    ids = [r.get("instance_id") for r in records]
+    counts = Counter(ids)
+    dups = sorted(iid for iid, c in counts.items() if c > 1 and iid is not None)
+    if dups:
+        lines = [
+            f"duplicate instance_id(s) in {condition} ({len(dups)}):",
+            *(f"  {iid} ({counts[iid]}x)" for iid in dups),
+        ]
+        raise ValueError("\n".join(lines))
 
 
 def build_artifact(
