@@ -128,19 +128,97 @@ def test_path_flag_followed_by_dash_leading_filename_is_still_normalized(
     assert out[1] == str((tmp_path / "-weird.txt").resolve())
 
 
-def test_path_flag_followed_by_short_flag_treats_short_flag_as_value(
+def test_path_flag_followed_by_builtin_short_help_is_not_swallowed(
     tmp_path: Path,
 ) -> None:
-    """Documented behavior boundary: a short flag like ``-v`` after a
-    path flag will be normalized as a path (``/abs/-v``). Downstream
-    argparse then raises ``unrecognized argument: /abs/-v`` — a
-    clearer failure than silently consuming the short flag. The
-    benchmarks SWE-bench CLI uses only long-form flags, so this case
-    is a no-op in practice; the test pins the documented boundary.
+    """Roborev #823 Medium: ``-h`` is argparse's built-in help flag
+    and must not be consumed as a path value. ``_looks_like_flag``
+    matches short options by shape (``^-[A-Za-z](=.*)?$``), so
+    ``-h``, ``-v``, etc. are recognized as flags and left for the
+    downstream parser to handle.
     """
-    out = normalize(["--prompt-path", "-v"], tmp_path)
-    assert out[0] == "--prompt-path"
-    assert out[1] == str((tmp_path / "-v").resolve())
+    out = normalize(["--prompt-path", "-h"], tmp_path)
+    assert out == ["--prompt-path", "-h"]
+
+
+def test_path_flag_followed_by_short_flag_with_value_is_not_swallowed(
+    tmp_path: Path,
+) -> None:
+    """Short option with inline value (``-n=5``) also looks like a
+    flag and should not be consumed as a path.
+    """
+    out = normalize(["--prompt-path", "-n=5"], tmp_path)
+    assert out == ["--prompt-path", "-n=5"]
+
+
+def test_is_usable_api_key_rejects_redacted_and_whitespace() -> None:
+    """Roborev #823 Low: the downstream LLM loader treats
+    ``""``, ``"   "``, and ``"**********"`` (Pydantic SecretStr mask)
+    as missing credentials and normalizes them to ``None``. The
+    wrapper's early-return check must apply the same normalization
+    so an llm.json dumped from a non-expose-secrets serialization
+    round trip still triggers env-var injection.
+    """
+    # usable
+    assert wrapper._is_usable_api_key("sk-svcacct-abc123") is True
+    assert wrapper._is_usable_api_key("x") is True
+    # not usable: downstream loader coerces these to None
+    assert wrapper._is_usable_api_key(None) is False
+    assert wrapper._is_usable_api_key("") is False
+    assert wrapper._is_usable_api_key("   ") is False
+    assert wrapper._is_usable_api_key("\t\n") is False
+    assert wrapper._is_usable_api_key("**********") is False
+    # non-str values also count as not usable
+    assert wrapper._is_usable_api_key(123) is False
+    assert wrapper._is_usable_api_key(None) is False
+
+
+def test_inject_api_key_treats_redacted_existing_value_as_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Roborev #823 Low: if llm.json carries ``api_key: "**********"``
+    (e.g. dumped from a prior LLM().model_dump() without
+    ``expose_secrets=True``), the wrapper must still inject the real
+    key from env — otherwise the container receives the mask string
+    as a credential and the request errors downstream.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-key")
+    cfg = tmp_path / "llm.json"
+    cfg.write_text('{"model": "openai/gpt-5", "api_key": "**********"}')
+    resolved = wrapper._inject_api_key(cfg)
+    assert resolved != cfg  # temp file created
+    try:
+        data = __import__("json").loads(resolved.read_text())
+        assert data["api_key"] == "sk-real-key"
+        assert data["model"] == "openai/gpt-5"
+    finally:
+        resolved.unlink(missing_ok=True)
+
+
+def test_inject_api_key_preserves_valid_existing_value(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-key")
+    cfg = tmp_path / "llm.json"
+    cfg.write_text('{"model": "openai/gpt-5", "api_key": "sk-already-set"}')
+    resolved = wrapper._inject_api_key(cfg)
+    assert resolved == cfg  # no temp file
+
+
+def test_looks_like_flag_heuristic() -> None:
+    """Pin the boundary: what counts as a flag vs a value?"""
+    assert wrapper._looks_like_flag("--foo") is True
+    assert wrapper._looks_like_flag("--foo=bar") is True
+    assert wrapper._looks_like_flag("-h") is True
+    assert wrapper._looks_like_flag("-v") is True
+    assert wrapper._looks_like_flag("-n=5") is True
+    # Dash-prefixed values (filenames, negative numbers) are NOT flags:
+    assert wrapper._looks_like_flag("-weird.txt") is False
+    assert wrapper._looks_like_flag("-3") is False
+    assert wrapper._looks_like_flag("-3.14") is False
+    assert wrapper._looks_like_flag("foo.txt") is False
+    # argparse's ``--`` positional separator counts as a flag (not a
+    # value) — leave it for the downstream parser. ``--prompt-path --``
+    # therefore passes through unchanged.
+    assert wrapper._looks_like_flag("--") is True
 
 
 def test_suffix_match_is_exact_not_substring(tmp_path: Path) -> None:

@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -103,6 +104,26 @@ def _load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+# Matches the masked-secret sentinel that Pydantic's SecretStr emits when
+# a model is dumped without ``expose_secrets=True``. Mirrors
+# ``validate_secret`` in openhands-sdk/openhands/sdk/utils/pydantic_secrets.py:
+# empty / whitespace-only / masked values are all coerced to None by the
+# downstream LLM loader, so we treat them as missing here too — otherwise
+# an llm.json dumped from a previous non-expose-secrets serialization
+# would skip injection and the container would still receive no key.
+_REDACTED_SENTINEL = "**********"
+
+
+def _is_usable_api_key(value: object) -> bool:
+    """Mirror LLM loader's empty/redacted → ``None`` rule."""
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    return value != _REDACTED_SENTINEL
+
+
 def _inject_api_key(llm_config_path: Path) -> Path:
     """Return a JSON path with ``api_key`` populated from the provider's env var.
 
@@ -117,7 +138,8 @@ def _inject_api_key(llm_config_path: Path) -> Path:
     the runner exits (compare returned path to the input to decide).
     """
     data = json.loads(llm_config_path.read_text(encoding="utf-8"))
-    if data.get("api_key"):
+    existing = data.get("api_key")
+    if _is_usable_api_key(existing):
         return llm_config_path
     model = data.get("model", "")
     env_var = next(
@@ -144,6 +166,28 @@ def _inject_api_key(llm_config_path: Path) -> Path:
 # vendor benchmarks clone.
 _PATH_SUFFIXES = ("-path", "-file", "-dir", "-config")
 
+# Recognizes single-dash short options (``-h``, ``-v``, ``-n=5``) — a
+# single ASCII letter after the dash, optionally followed by ``=value``.
+# Distinguishes short flags from dash-prefixed filenames like
+# ``-weird.txt`` (two letters before the ``.`` — doesn't match) or
+# ``-3.14`` (digit, not letter — doesn't match).
+_SHORT_FLAG_RE = re.compile(r"^-[A-Za-z](=.*)?$")
+
+
+def _looks_like_flag(tok: str) -> bool:
+    """True iff ``tok`` is plausibly an option flag.
+
+    Long options (``--foo``) always count. Single-dash tokens count only
+    if they match the short-option shape (``-h``, ``-v``, ``-n=5``) —
+    this lets dash-prefixed filenames (``-weird.txt``, ``-3.14``) pass
+    through as values, per roborev #822, while still treating real
+    short options (``-h``, argparse's built-in help) as flags, per
+    roborev #823.
+    """
+    if tok.startswith("--"):
+        return True
+    return bool(_SHORT_FLAG_RE.match(tok))
+
 
 def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> list[str]:
     """Normalize path-bearing passthrough args against ``original_cwd``.
@@ -159,19 +203,19 @@ def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> l
     anchors, not substring — ``--pathwise`` is not treated as a path
     flag.
 
-    "Is the next token another flag?" heuristic: only tokens beginning
-    with ``--`` (long-form option, per argparse convention) are treated
-    as flags. Single-dash tokens like ``-weird.txt`` or ``-5.0`` are
-    treated as legitimate path values — rare but valid filenames
-    shouldn't lose cwd normalization. If the user really passes a
-    short flag (``-v``) as the value, downstream argparse will raise
-    an "unrecognized argument" error on the mangled path, which is a
-    clearer failure than silently swallowing a long flag.
+    "Is the next token another flag?" heuristic uses
+    :func:`_looks_like_flag`:
+
+    - ``--foo`` → flag (long options, roborev #821)
+    - ``-h``, ``-v``, ``-n=5`` → flag (short options matching
+      ``^-[A-Za-z](=.*)?$``, roborev #823)
+    - ``-weird.txt``, ``-3.14`` → value (dash-prefixed filenames, rare
+      but legitimate, roborev #822)
 
     Trailing path-flags with no value — or path-flags immediately
-    followed by another ``--``-prefixed flag — pass through as-is so
-    the downstream argparse produces its canonical "expected one
-    argument" error rather than silently consuming the next flag.
+    followed by something that looks like another flag — pass through
+    as-is so the downstream argparse produces its canonical "expected
+    one argument" error rather than silently consuming the next flag.
     """
     out: list[str] = []
     i = 0
@@ -181,13 +225,7 @@ def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> l
             if "=" in tok:
                 flag, value = tok.split("=", 1)
                 out.append(f"{flag}={(original_cwd / value).resolve()}")
-            elif i + 1 < len(passthrough) and not passthrough[i + 1].startswith("--"):
-                # Consume the next token as the path value unless it's
-                # itself a long-form flag (``--foo``). Single-dash
-                # tokens are treated as values so that legitimate
-                # dash-prefixed filenames (``-weird.txt``, ``-3``) keep
-                # their cwd normalization. See the guard rationale in
-                # the docstring.
+            elif i + 1 < len(passthrough) and not _looks_like_flag(passthrough[i + 1]):
                 flag = tok
                 value = passthrough[i + 1]
                 out.extend([flag, str((original_cwd / value).resolve())])
