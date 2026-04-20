@@ -211,11 +211,15 @@ def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> l
     "Is the next token another flag?" heuristic uses
     :func:`_looks_like_flag`:
 
-    - ``--foo`` → flag (long options, roborev #821)
-    - ``-h``, ``-v``, ``-n=5`` → flag (short options matching
-      ``^-[A-Za-z](=.*)?$``, roborev #823)
-    - ``-weird.txt``, ``-3.14`` → value (dash-prefixed filenames, rare
-      but legitimate, roborev #822)
+    - ``--foo``, ``--foo=bar`` → flag (long options, roborev #821)
+    - bare ``-h`` → flag (the only short option the benchmarks parser
+      exposes, via argparse's default ``add_help=True``; roborev
+      #823/#826)
+    - ``-v``, ``-a``, ``-n=5``, ``-h=1``, ``-weird.txt``, ``-3.14`` →
+      value (dash-prefixed filenames — even those that shape-wise
+      resemble short flags — are cwd-normalized, because the
+      benchmarks CLI defines no short options of its own; roborev
+      #822/#824/#826)
 
     Trailing path-flags with no value — or path-flags immediately
     followed by something that looks like another flag — pass through
