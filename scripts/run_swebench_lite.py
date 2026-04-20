@@ -29,8 +29,10 @@ See ``scripts/README.md`` for end-to-end reproduction commands.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # IMPORTANT: register_critic mutates benchmarks.utils.critics.CRITIC_NAME_TO_CLASS
@@ -58,6 +60,83 @@ import register_critic  # noqa: F401 — load for side effect
 _VENDOR_BENCHMARKS_DIR = Path(__file__).resolve().parent.parent / ".vendor" / "benchmarks"
 
 
+# Mapping from model-name prefix to the env var LiteLLM uses for that
+# provider. Used by ``_inject_api_key`` when the user's LLM config JSON
+# omits ``api_key`` — the wrapper reads the provider's env var and
+# writes a temp config with ``api_key`` populated so the value travels
+# into the remote agent-server conversation (the conversation runs
+# inside the Docker workspace; env vars there don't include host keys
+# unless explicitly forwarded, which the benchmarks CLI doesn't expose).
+_PROVIDER_ENV_VARS: dict[str, str] = {
+    "openai/": "OPENAI_API_KEY",
+    "anthropic/": "ANTHROPIC_API_KEY",
+    "gemini/": "GEMINI_API_KEY",
+    "mistral/": "MISTRAL_API_KEY",
+    "deepseek/": "DEEPSEEK_API_KEY",
+    "groq/": "GROQ_API_KEY",
+    "cohere/": "COHERE_API_KEY",
+    "together_ai/": "TOGETHERAI_API_KEY",
+    "openrouter/": "OPENROUTER_API_KEY",
+    "xai/": "XAI_API_KEY",
+}
+
+
+def _load_dotenv(path: Path) -> None:
+    """Read a simple ``KEY=VALUE`` ``.env`` file into ``os.environ``.
+
+    Does not overwrite existing env vars — caller's shell-exported
+    values win over the ``.env`` file, matching dotenv convention.
+    Minimal parser (no quoting, no ``export`` prefix, no variable
+    substitution) so the wrapper doesn't add a third-party dep for
+    what's a one-file lookup. Lines starting with ``#`` are comments.
+    """
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def _inject_api_key(llm_config_path: Path) -> Path:
+    """Return a JSON path with ``api_key`` populated from the provider's env var.
+
+    If the user's config already sets ``api_key``, returns the path
+    unchanged. Otherwise detects the provider from the ``model`` prefix
+    (see :data:`_PROVIDER_ENV_VARS`), reads that env var, and writes a
+    temp file with the key merged in. The temp file lives in the
+    system temp dir with restrictive permissions (``0o600``) so the
+    secret isn't world-readable on shared machines.
+
+    Caller is responsible for unlinking the returned temp path after
+    the runner exits (compare returned path to the input to decide).
+    """
+    data = json.loads(llm_config_path.read_text(encoding="utf-8"))
+    if data.get("api_key"):
+        return llm_config_path
+    model = data.get("model", "")
+    env_var = next(
+        (env for prefix, env in _PROVIDER_ENV_VARS.items() if model.startswith(prefix)),
+        None,
+    )
+    if env_var is None or not os.environ.get(env_var):
+        # No known mapping or no env var set — let downstream LLM
+        # validation handle the missing-credential case explicitly.
+        return llm_config_path
+    data["api_key"] = os.environ[env_var]
+    fd, tmp_name = tempfile.mkstemp(prefix="llm-config-", suffix=".json")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    tmp_path.write_text(json.dumps(data), encoding="utf-8")
+    tmp_path.chmod(0o600)
+    return tmp_path
+
+
 # Flag-name suffixes that indicate a path-bearing argument. A forwarded
 # passthrough flag whose name (before any ``=``) ends with one of these
 # suffixes is treated as carrying a filesystem path whose value must be
@@ -76,13 +155,23 @@ def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> l
     ends up pointing at ``original_cwd/../x.j2``, not
     ``.vendor/benchmarks/../x.j2`` after the wrapper's chdir.
 
-    Unknown flags pass through untouched. Trailing path-flags with no
-    value — or path-flags followed by another flag (anything starting
-    with ``-``) — pass through as-is so the downstream argparse
-    produces its canonical "expected one argument" error rather than
-    silently swallowing the following flag. Matching uses exact suffix
+    Unknown flags pass through untouched. Matching uses exact suffix
     anchors, not substring — ``--pathwise`` is not treated as a path
     flag.
+
+    "Is the next token another flag?" heuristic: only tokens beginning
+    with ``--`` (long-form option, per argparse convention) are treated
+    as flags. Single-dash tokens like ``-weird.txt`` or ``-5.0`` are
+    treated as legitimate path values — rare but valid filenames
+    shouldn't lose cwd normalization. If the user really passes a
+    short flag (``-v``) as the value, downstream argparse will raise
+    an "unrecognized argument" error on the mangled path, which is a
+    clearer failure than silently swallowing a long flag.
+
+    Trailing path-flags with no value — or path-flags immediately
+    followed by another ``--``-prefixed flag — pass through as-is so
+    the downstream argparse produces its canonical "expected one
+    argument" error rather than silently consuming the next flag.
     """
     out: list[str] = []
     i = 0
@@ -92,11 +181,13 @@ def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> l
             if "=" in tok:
                 flag, value = tok.split("=", 1)
                 out.append(f"{flag}={(original_cwd / value).resolve()}")
-            elif i + 1 < len(passthrough) and not passthrough[i + 1].startswith("-"):
-                # Only consume the next token if it looks like a value
-                # (argparse convention: values can't start with ``-``).
-                # Otherwise leave the path flag untouched and let the
-                # downstream parser diagnose the missing-value case.
+            elif i + 1 < len(passthrough) and not passthrough[i + 1].startswith("--"):
+                # Consume the next token as the path value unless it's
+                # itself a long-form flag (``--foo``). Single-dash
+                # tokens are treated as values so that legitimate
+                # dash-prefixed filenames (``-weird.txt``, ``-3``) keep
+                # their cwd normalization. See the guard rationale in
+                # the docstring.
                 flag = tok
                 value = passthrough[i + 1]
                 out.extend([flag, str((original_cwd / value).resolve())])
@@ -159,9 +250,24 @@ def main() -> None:
     # before we chdir into the vendor benchmarks clone. Otherwise the
     # benchmark runner's argparse would try to resolve them relative to
     # the clone and fail.
-    llm_config_abs = str(Path(args.llm_config).resolve())
+    llm_config_path = Path(args.llm_config).resolve()
     select_abs = str(Path(args.select).resolve())
     output_dir_abs = str(Path(args.output_dir).resolve())
+
+    # Pull OPENAI_API_KEY / ANTHROPIC_API_KEY / etc. from a ``.env`` in
+    # the caller's cwd before merging into the LLM config. Shell-
+    # exported values win over file values, dotenv convention.
+    _load_dotenv(Path.cwd() / ".env")
+
+    # If the user's LLM config omits ``api_key``, synthesize a merged
+    # temp config with the provider's env-var value. The agent-server
+    # running inside the Docker workspace needs an explicit key on the
+    # serialized LLM object — host env vars don't propagate into the
+    # container unless explicitly forwarded, and the benchmarks CLI
+    # doesn't expose a ``--forward-env`` flag.
+    effective_llm_config = _inject_api_key(llm_config_path)
+    llm_config_abs = str(effective_llm_config)
+    temp_llm_config = effective_llm_config if effective_llm_config != llm_config_path else None
 
     # Reconstruct sys.argv for the benchmarks CLI. The benchmarks runner
     # uses argparse against sys.argv directly, so we rewrite it here.
@@ -192,7 +298,8 @@ def main() -> None:
 
     # Stay in the benchmarks repo cwd throughout — see module-level
     # comment on ``_VENDOR_BENCHMARKS_DIR``. Restore the original cwd
-    # after the runner completes.
+    # after the runner completes, and unlink the temp LLM config if we
+    # synthesized one (secret cleanup).
     os.chdir(_VENDOR_BENCHMARKS_DIR)
     try:
         from benchmarks.swebench.run_infer import main as swebench_main
@@ -200,6 +307,8 @@ def main() -> None:
         swebench_main()
     finally:
         os.chdir(str(original_cwd))
+        if temp_llm_config is not None:
+            temp_llm_config.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

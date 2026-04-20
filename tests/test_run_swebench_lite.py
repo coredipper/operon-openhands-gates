@@ -101,45 +101,46 @@ def test_trailing_path_flag_with_no_value_passes_through_as_is(
     assert out == ["--some-setting", "x", "--prompt-path"]
 
 
-def test_path_flag_followed_by_another_flag_is_not_swallowed(
+def test_path_flag_followed_by_long_flag_is_not_swallowed(
     tmp_path: Path,
 ) -> None:
     """Roborev #821 Medium: ``--prompt-path --num-workers 4`` must NOT
-    consume ``--num-workers`` as the path value. argparse convention
-    reserves ``-``-prefixed tokens for flags, so the normalizer leaves
-    the dangling path flag alone and the downstream parser produces
-    its canonical "expected one argument" error.
+    consume ``--num-workers`` as the path value. The normalizer
+    detects ``--``-prefixed tokens as long-form flags and leaves the
+    dangling path flag alone so downstream argparse produces its
+    canonical "expected one argument" error.
     """
     out = normalize(["--prompt-path", "--num-workers", "4"], tmp_path)
     assert out == ["--prompt-path", "--num-workers", "4"]
 
 
-def test_path_flag_followed_by_short_flag_is_not_swallowed(
+def test_path_flag_followed_by_dash_leading_filename_is_still_normalized(
     tmp_path: Path,
 ) -> None:
-    """Short flags (``-v``, ``-h``) also start with ``-`` and must not
-    be consumed as a path value.
+    """Roborev #822 Medium: rare but legitimate dash-prefixed filenames
+    (``-weird.txt``, negative-ish names from tooling output) must keep
+    cwd normalization. The guard treats only ``--``-prefixed tokens as
+    flags; a single-dash token is a value.
+    """
+    (tmp_path / "-weird.txt").write_text("")
+    out = normalize(["--prompt-path", "-weird.txt"], tmp_path)
+    assert out[0] == "--prompt-path"
+    assert out[1] == str((tmp_path / "-weird.txt").resolve())
+
+
+def test_path_flag_followed_by_short_flag_treats_short_flag_as_value(
+    tmp_path: Path,
+) -> None:
+    """Documented behavior boundary: a short flag like ``-v`` after a
+    path flag will be normalized as a path (``/abs/-v``). Downstream
+    argparse then raises ``unrecognized argument: /abs/-v`` — a
+    clearer failure than silently consuming the short flag. The
+    benchmarks SWE-bench CLI uses only long-form flags, so this case
+    is a no-op in practice; the test pins the documented boundary.
     """
     out = normalize(["--prompt-path", "-v"], tmp_path)
-    assert out == ["--prompt-path", "-v"]
-
-
-def test_path_flag_followed_by_value_starting_with_dash_is_still_not_swallowed(
-    tmp_path: Path,
-) -> None:
-    """Edge case: a user might genuinely want a file literally named
-    ``-weird.txt``, but argparse couldn't accept it as a positional
-    either. Fail safe — leave the flag untouched; the user can use
-    ``--prompt-path=-weird.txt`` to bypass the heuristic (that path
-    still goes through the ``=`` branch, which does NOT check the
-    leading-dash guard).
-    """
-    out = normalize(["--prompt-path", "-weird.txt"], tmp_path)
-    assert out == ["--prompt-path", "-weird.txt"]
-    # escape hatch: equals-form still normalizes even a dash-leading
-    # value, because the guard only applies to separate-value tokens.
-    out2 = normalize(["--prompt-path=-weird.txt"], tmp_path)
-    assert out2 == [f"--prompt-path={(tmp_path / '-weird.txt').resolve()}"]
+    assert out[0] == "--prompt-path"
+    assert out[1] == str((tmp_path / "-v").resolve())
 
 
 def test_suffix_match_is_exact_not_substring(tmp_path: Path) -> None:
