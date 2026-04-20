@@ -25,7 +25,18 @@ python3.12 -m venv .venv-experiment
 mkdir -p .vendor
 git clone https://github.com/OpenHands/benchmarks.git .vendor/benchmarks
 git -C .vendor/benchmarks checkout 00182bf07968d2e9eb0a57f76ae58c9155e66f32
+git -C .vendor/benchmarks submodule update --init --recursive --depth 1
 .venv-experiment/bin/pip install -e .vendor/benchmarks
+
+# Editable-install the vendored SDK subpackages to override the
+# PyPI wheels. ``openhands.agent_server.docker.build`` rejects paths
+# inside ``site-packages`` as "installed, not a source checkout" —
+# the wheel-installed copies can't resolve the UV workspace root.
+# Editable installs make ``__file__`` point into the vendor source
+# tree, where the workspace-root climb succeeds.
+for pkg in openhands-sdk openhands-tools openhands-workspace openhands-agent-server; do
+  .venv-experiment/bin/pip install -e ".vendor/benchmarks/vendor/software-agent-sdk/$pkg"
+done
 # Commit SHA pinned to current main at 2026-04-19.
 # Update deliberately — upstream may rename CRITIC_NAME_TO_CLASS or
 # otherwise break the registration mechanism.
