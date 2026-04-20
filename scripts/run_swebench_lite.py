@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import tempfile
 from pathlib import Path
@@ -166,27 +165,37 @@ def _inject_api_key(llm_config_path: Path) -> Path:
 # vendor benchmarks clone.
 _PATH_SUFFIXES = ("-path", "-file", "-dir", "-config")
 
-# Recognizes single-dash short options (``-h``, ``-v``, ``-n=5``) — a
-# single ASCII letter after the dash, optionally followed by ``=value``.
-# Distinguishes short flags from dash-prefixed filenames like
-# ``-weird.txt`` (two letters before the ``.`` — doesn't match) or
-# ``-3.14`` (digit, not letter — doesn't match).
-_SHORT_FLAG_RE = re.compile(r"^-[A-Za-z](=.*)?$")
+# Known short options recognized by the downstream benchmarks
+# ``argparse`` parser. The benchmarks SWE-bench CLI defines no
+# short-form options of its own; only argparse's built-in ``-h``
+# (``--help``, auto-registered unless ``add_help=False``) is
+# guaranteed. Keeping this set explicit — rather than matching every
+# ``-<letter>`` token by shape — avoids misclassifying legitimate
+# dash-prefixed filenames like ``-a.py`` or ``-v.json`` as flags and
+# stripping their cwd normalization. See roborev #822/#824.
+#
+# If the benchmarks parser ever adds its own short options, extend
+# this set rather than broaden the matcher.
+_KNOWN_SHORT_FLAGS: frozenset[str] = frozenset({"-h"})
 
 
 def _looks_like_flag(tok: str) -> bool:
     """True iff ``tok`` is plausibly an option flag.
 
-    Long options (``--foo``) always count. Single-dash tokens count only
-    if they match the short-option shape (``-h``, ``-v``, ``-n=5``) —
-    this lets dash-prefixed filenames (``-weird.txt``, ``-3.14``) pass
-    through as values, per roborev #822, while still treating real
-    short options (``-h``, argparse's built-in help) as flags, per
-    roborev #823.
+    Long options (``--foo``, ``--foo=bar``) always count. Single-dash
+    tokens count only if they are listed in :data:`_KNOWN_SHORT_FLAGS`
+    — keeping the known-short-flag set narrow prevents misclassifying
+    legitimate dash-prefixed filenames (``-a.py``, ``-v.json``,
+    ``-3.14``) as flags (roborev #824 feedback). Unknown dash-prefixed
+    tokens are treated as values and normalized against the caller's
+    cwd, which is the behavior dash-prefixed filenames need.
     """
     if tok.startswith("--"):
         return True
-    return bool(_SHORT_FLAG_RE.match(tok))
+    # Strip ``=value`` suffix before set membership check so ``-h=1``
+    # (rare but theoretically valid) still counts as a flag.
+    flag_name = tok.split("=", 1)[0]
+    return flag_name in _KNOWN_SHORT_FLAGS
 
 
 def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> list[str]:

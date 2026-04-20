@@ -133,22 +133,41 @@ def test_path_flag_followed_by_builtin_short_help_is_not_swallowed(
 ) -> None:
     """Roborev #823 Medium: ``-h`` is argparse's built-in help flag
     and must not be consumed as a path value. ``_looks_like_flag``
-    matches short options by shape (``^-[A-Za-z](=.*)?$``), so
-    ``-h``, ``-v``, etc. are recognized as flags and left for the
-    downstream parser to handle.
+    treats it as a known short option (in ``_KNOWN_SHORT_FLAGS``) and
+    leaves it for the downstream parser.
     """
     out = normalize(["--prompt-path", "-h"], tmp_path)
     assert out == ["--prompt-path", "-h"]
 
 
-def test_path_flag_followed_by_short_flag_with_value_is_not_swallowed(
+def test_path_flag_followed_by_dash_letter_filename_is_normalized(
     tmp_path: Path,
 ) -> None:
-    """Short option with inline value (``-n=5``) also looks like a
-    flag and should not be consumed as a path.
+    """Roborev #824 Medium: single-letter dash tokens like ``-a``,
+    ``-v`` are NOT special-cased as flags unless they're in the
+    narrow ``_KNOWN_SHORT_FLAGS`` set. The benchmarks SWE-bench CLI
+    defines no short options of its own, so only ``-h`` is treated
+    as a flag; everything else (``-a``, ``-v``, ``-n=5``, ...)
+    passes through as a legitimate path value and gets cwd-
+    normalized.
     """
+    (tmp_path / "-a").write_text("")
+    out = normalize(["--prompt-path", "-a"], tmp_path)
+    assert out[0] == "--prompt-path"
+    assert out[1] == str((tmp_path / "-a").resolve())
+
+
+def test_path_flag_followed_by_dash_letter_equals_is_normalized(
+    tmp_path: Path,
+) -> None:
+    """Roborev #824 Medium: ``-n=5`` looks shape-wise like a short
+    option but isn't registered by benchmarks' parser, so it's a
+    (weird) filename and should get normalized.
+    """
+    (tmp_path / "-n=5").write_text("")
     out = normalize(["--prompt-path", "-n=5"], tmp_path)
-    assert out == ["--prompt-path", "-n=5"]
+    assert out[0] == "--prompt-path"
+    assert out[1] == str((tmp_path / "-n=5").resolve())
 
 
 def test_is_usable_api_key_rejects_redacted_and_whitespace() -> None:
@@ -205,12 +224,17 @@ def test_inject_api_key_preserves_valid_existing_value(tmp_path: Path, monkeypat
 
 def test_looks_like_flag_heuristic() -> None:
     """Pin the boundary: what counts as a flag vs a value?"""
+    # long options always count
     assert wrapper._looks_like_flag("--foo") is True
     assert wrapper._looks_like_flag("--foo=bar") is True
+    # known short options (argparse's built-in --help alias)
     assert wrapper._looks_like_flag("-h") is True
-    assert wrapper._looks_like_flag("-v") is True
-    assert wrapper._looks_like_flag("-n=5") is True
-    # Dash-prefixed values (filenames, negative numbers) are NOT flags:
+    assert wrapper._looks_like_flag("-h=1") is True
+    # single-letter dash tokens NOT in _KNOWN_SHORT_FLAGS are values:
+    assert wrapper._looks_like_flag("-v") is False
+    assert wrapper._looks_like_flag("-a") is False
+    assert wrapper._looks_like_flag("-n=5") is False
+    # Dash-prefixed filenames and negative numbers are values:
     assert wrapper._looks_like_flag("-weird.txt") is False
     assert wrapper._looks_like_flag("-3") is False
     assert wrapper._looks_like_flag("-3.14") is False
