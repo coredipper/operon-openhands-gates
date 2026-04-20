@@ -125,9 +125,25 @@ def _aggregate(
     n_events = [len(r.get("history") or []) for r in finals]
     max_attempts = [max(r.get("attempt", 1) for r in rs) for rs in by_iid.values()]
 
-    completed_retries = sum(1 for a in max_attempts if a > 1)
+    # Retry accounting — roborev #837 Medium 1. Distinguish:
+    # - ``instances_with_completed_retry``: count of instances where
+    #   max_attempt > 1 (at least one critic-rejection-and-retry loop
+    #   closed successfully). This is what scales the retry rate.
+    # - ``total_completed_retries``: actual count of retry rounds
+    #   across instances — ``(max_attempt - 1)`` summed. Matters when
+    #   an instance reaches attempt=3 or higher (2+ retries on that
+    #   single instance). In this slice every retried instance
+    #   completed exactly one retry, so the two numbers coincide,
+    #   but the denominator for the per-retry cost figure should
+    #   divide by total retries, not instances-with-retry, to stay
+    #   correct under higher-attempt runs.
+    instances_with_completed_retry = sum(1 for a in max_attempts if a > 1)
+    total_completed_retries = sum(a - 1 for a in max_attempts if a > 1)
     aborted_in_scope = sorted(aborted_retries & set(by_iid.keys()))
-    critic_rejections = completed_retries + len(aborted_in_scope)
+    # ``critic_rejections`` = total retry rounds (completed + aborted).
+    # Each aborted retry is one rejection; we can't count multiple
+    # aborted rounds per instance since no row is written.
+    critic_rejections = total_completed_retries + len(aborted_in_scope)
 
     return {
         "n_instances": len(by_iid),
@@ -139,11 +155,48 @@ def _aggregate(
         "cumulative_reasoning_tokens": {"total": sum(cum_reason), **_safe_agg(cum_reason)},
         "critic_rejections": critic_rejections,
         "critic_rejection_rate": round(critic_rejections / len(by_iid), 3),
-        "completed_retries": completed_retries,
+        "completed_retries": total_completed_retries,
+        "instances_with_completed_retry": instances_with_completed_retry,
         "aborted_retries": len(aborted_in_scope),
         "aborted_retry_instance_ids": aborted_in_scope,
         "max_attempt_histogram": dict(Counter(max_attempts)),
     }
+
+
+def _validate_aborted_retries(
+    treatment_rows: list[dict],
+    aborted_retries: set[str],
+) -> None:
+    """Reject misspelled or inconsistent ``--aborted-treatment-retry`` IDs.
+
+    Roborev #837 Medium 2. A silently-dropped typo or an ID that already
+    has a completed retry row would double-count into both
+    ``completed_retries`` and ``aborted_retries``, inflating the
+    headline rejection metric. Fail fast with a message that names
+    the offending ID so the user fixes the CLI flag rather than the
+    artifact.
+    """
+    by_treat = _by_instance(treatment_rows)
+    treat_ids = set(by_treat.keys())
+    missing = sorted(aborted_retries - treat_ids)
+    if missing:
+        raise ValueError(
+            "--aborted-treatment-retry IDs not found in treatment run: "
+            + ", ".join(missing)
+            + f"\n  available IDs: {sorted(treat_ids)}"
+        )
+    # Instances that already have a completed retry (attempt > 1) can't
+    # also be marked aborted — those double-count.
+    has_completed = {
+        iid for iid in aborted_retries if max(r.get("attempt", 1) for r in by_treat[iid]) > 1
+    }
+    if has_completed:
+        raise ValueError(
+            "--aborted-treatment-retry IDs that already have a "
+            "completed retry row (attempt > 1 in output.jsonl): "
+            + ", ".join(sorted(has_completed))
+            + "\n  these would be double-counted. Remove them from the flag."
+        )
 
 
 def build_artifact(
@@ -160,6 +213,8 @@ def build_artifact(
             f"baseline-only={sorted(base_ids - treat_ids)}, "
             f"treatment-only={sorted(treat_ids - base_ids)}"
         )
+
+    _validate_aborted_retries(treatment_rows, aborted_treatment_retries)
 
     by_base = _by_instance(baseline_rows)
     by_treat = _by_instance(treatment_rows)
