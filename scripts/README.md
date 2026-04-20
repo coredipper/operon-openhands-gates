@@ -16,22 +16,28 @@ Two-condition experiment: OpenHands `CodeActAgent` with the default `AgentFinish
 python3.12 -m venv .venv-experiment
 .venv-experiment/bin/pip install --upgrade pip
 .venv-experiment/bin/pip install -e .
-.venv-experiment/bin/pip install \
-  "openhands-benchmarks @ git+https://github.com/OpenHands/benchmarks@00182bf07968d2e9eb0a57f76ae58c9155e66f32"
+
+# openhands-benchmarks' pyproject ships a broken setuptools
+# ``packages.find`` pattern (``include = ["benchmarks"]`` excludes
+# subpackages). A wheel install gives you an empty ``benchmarks``
+# package. Work around by cloning + editable install, which uses
+# the on-disk layout directly.
+mkdir -p .vendor
+git clone https://github.com/OpenHands/benchmarks.git .vendor/benchmarks
+git -C .vendor/benchmarks checkout 00182bf07968d2e9eb0a57f76ae58c9155e66f32
+.venv-experiment/bin/pip install -e .vendor/benchmarks
 # Commit SHA pinned to current main at 2026-04-19.
 # Update deliberately — upstream may rename CRITIC_NAME_TO_CLASS or
 # otherwise break the registration mechanism.
 ```
 
-Write an LLM config JSON at `scripts/llm.json`:
+Copy `scripts/llm.json.example` → `scripts/llm.json` (gitignored). LiteLLM reads the API key from the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.), so the config file itself carries no secrets — but the filename is on the ignore list anyway in case you add one:
 
-```json
-{
-  "model": "anthropic/claude-sonnet-4-6",
-  "api_key": "...",
-  "max_output_tokens": 8192
-}
+```bash
+cp scripts/llm.json.example scripts/llm.json
 ```
+
+Then `export ANTHROPIC_API_KEY=...` (or source your existing env) before running.
 
 ## Smoke test (1 instance, ≤ $0.50)
 

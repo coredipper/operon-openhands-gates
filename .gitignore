@@ -33,3 +33,7 @@ htmlcov/
 # Local
 *.log
 .env
+.venv-experiment/
+scripts/llm.json
+eval/runs/
+.vendor/
