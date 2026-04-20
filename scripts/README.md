@@ -113,7 +113,19 @@ Two aggregators, pick by whether you've run the SWE-bench patch-evaluation stage
   --out-md eval/results/swebench_lite_delta.md
 ```
 
-Emits per-instance cost + attempt counts, `critic_rejections` (completed + aborted), per-completed-retry cost, and the markdown writeup in one pass. `--aborted-treatment-retry` is repeatable and marks instances whose treatment Attempt-2 started but didn't complete (timeout etc.); the script surfaces them in the headline retry count without biasing the per-retry cost figure.
+Emits the markdown writeup alongside a JSON artifact whose `summary` block carries two orthogonal retry metrics:
+
+- **Per-instance** (always in [0, 1] — use for headline rate and prose):
+  - `instances_with_rejection` / `instances_with_rejection_rate` — count / fraction of instances with at least one critic rejection (completed or aborted retry).
+  - `instances_with_completed_retry` — subset with `max_attempt > 1`.
+  - `aborted_retries` / `aborted_retry_instance_ids` — instances pinned via `--aborted-treatment-retry`.
+- **Per-round** (grows with retry depth — use for cost denominators):
+  - `total_retry_rounds` — `total_completed_retry_rounds + aborted_retries`.
+  - `total_completed_retry_rounds` — `Σ (max_attempt - 1)` across instances. Denominator for `$/retry-round` overhead.
+
+Per-instance `per_instance[*]` rows carry `baseline_max_attempt`, `treatment_max_attempt`, `treatment_retry_aborted` (bool), cumulative costs, and final patch lengths.
+
+`--aborted-treatment-retry` is repeatable and marks instances whose treatment Attempt-2 started but didn't complete (e.g. timeout). Unknown IDs or IDs already having a completed retry row raise a validation error (they would otherwise double-count).
 
 ### Note on certificate fields
 
