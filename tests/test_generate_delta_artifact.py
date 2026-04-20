@@ -414,6 +414,23 @@ def test_validate_eval_report_accepts_matching_ids() -> None:
     gen._validate_eval_report_covers_rows(report, rows, "baseline")
 
 
+def test_markdown_does_not_claim_patch_evaluation_when_has_eval_is_false() -> None:
+    """Roborev #846 Medium: the infer-only branch must not say "from
+    inference through patch-evaluation" in the "Does" section. That
+    contradicts the "`resolved` not computed" caveat.
+    """
+    baseline = [_row("a", attempt=1)]
+    treatment = [_row("a", attempt=1)]
+    artifact = gen.build_artifact(baseline, treatment, set(), model="openai/gpt-5")
+    md = gen.generate_markdown(artifact)
+    assert "from inference through patch-evaluation" not in md
+    assert "inference only" in md
+    # "Does not" must include the no-eval caveat and its link:
+    assert "Establish whether retries improve patch correctness" in md
+    # Next steps should lead with running the eval
+    assert "Run SWE-bench evaluation" in md
+
+
 def test_markdown_without_eval_report_keeps_old_schema() -> None:
     """Back-compat: when no eval report supplied, pass@1 row + resolved
     columns absent; `resolved` not computed caveat present."""

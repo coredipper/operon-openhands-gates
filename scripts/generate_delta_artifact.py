@@ -609,6 +609,57 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
             "|----------|------------------:|-------------------:|--------------:|---------------:|"
         )
 
+    # "Does/Does not prove" + "Next steps" — gate claims on ``has_eval``
+    # (roborev #846 Medium). Unconditional "from inference through
+    # patch-evaluation" prose contradicts the caveats when the eval
+    # step wasn't run.
+    critic_rate_prose = (
+        f"The structural critic exhibits a measurably different rejection pattern "
+        f"from the default LLM critic "
+        f"({ts['instances_with_rejection_rate'] * 100:.0f}% of instances vs "
+        f"{bs['instances_with_rejection_rate'] * 100:.0f}%)."
+    )
+    overhead_prose = (
+        f"Per-retry-round overhead: {per_round_str}. Full-slice overhead: **+{delta_pct}%**."
+    )
+    # Which caveat number covers certificates depends on whether the
+    # "`resolved` not computed" caveat is present.
+    cert_caveat_num = 2 if has_eval else 3
+    if has_eval:
+        does_does_not_section = (
+            "**Does:**\n"
+            "- The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances, from inference through patch-evaluation.\n"
+            f"- {critic_rate_prose}\n"
+            f"- {overhead_prose}\n"
+            "\n"
+            "**Does not:**\n"
+            "- Generalize beyond the selection-biased instance subset (see caveat 1).\n"
+            f"- Provide on-disk certificate evidence (openhands-sdk serialization gap; see caveat {cert_caveat_num})."
+        )
+        next_steps_section = (
+            "1. **Fix the certificate-metadata serialization** so downstream consumers can populate `certificate_emitted`, `certificate_theorem`, `cert_evidence_n` without relying on the retry-count proxy.\n"
+            "2. **Rerun on a Linux host or `--workspace remote`** to get an unbiased 30-instance slice.\n"
+            "3. **Broader scope:** once the harness is stable, repeat on Claude Sonnet 4.6 (original plan default) and on SWE-bench-Verified."
+        )
+    else:
+        does_does_not_section = (
+            "**Does:**\n"
+            "- The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances (inference only; the SWE-bench patch-evaluation step was not run on this artifact).\n"
+            f"- {critic_rate_prose}\n"
+            f"- {overhead_prose}\n"
+            "\n"
+            "**Does not:**\n"
+            "- Establish whether retries improve patch correctness — that needs the SWE-bench evaluation step (see caveat 2).\n"
+            "- Generalize beyond the selection-biased instance subset (see caveat 1).\n"
+            f"- Provide on-disk certificate evidence (openhands-sdk serialization gap; see caveat {cert_caveat_num})."
+        )
+        next_steps_section = (
+            "1. **Run SWE-bench evaluation** on both `output.jsonl` files (dedupe treatment first via `scripts/dedupe_for_eval.py`), then pass the resulting `.report.json` files to this script via `--baseline-eval-report` / `--treatment-eval-report` to populate `pass_at_1`.\n"
+            "2. **Fix the certificate-metadata serialization** so downstream consumers can populate `certificate_emitted`, `certificate_theorem`, `cert_evidence_n` without relying on the retry-count proxy.\n"
+            "3. **Rerun on a Linux host or `--workspace remote`** to get an unbiased 30-instance slice.\n"
+            "4. **Broader scope:** once the harness is stable, repeat on Claude Sonnet 4.6 (original plan default) and on SWE-bench-Verified."
+        )
+
     return f"""# SWE-bench-lite delta: baseline vs OperonStagnationCritic
 
 **Scope:** n={bs["n_instances"]}, {artifact["model"]}, SWE-bench-lite `test` split, local Docker workspace on Apple Silicon.
@@ -655,20 +706,11 @@ All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delt
 
 ## What this does and does not prove
 
-**Does:**
-- The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances, from inference through patch-evaluation.
-- The structural critic exhibits a measurably different rejection pattern from the default LLM critic ({ts["instances_with_rejection_rate"] * 100:.0f}% of instances vs {bs["instances_with_rejection_rate"] * 100:.0f}%).
-- Per-retry-round overhead: {per_round_str}. Full-slice overhead: **+{delta_pct}%**.
-
-**Does not:**
-- Generalize beyond the selection-biased instance subset (see caveat 1).
-- Provide on-disk certificate evidence (openhands-sdk serialization gap; see caveat 2).
+{does_does_not_section}
 
 ## Next steps
 
-1. **Fix the certificate-metadata serialization** so downstream consumers can populate `certificate_emitted`, `certificate_theorem`, `cert_evidence_n` without relying on the retry-count proxy.
-2. **Rerun on a Linux host or `--workspace remote`** to get an unbiased 30-instance slice.
-3. **Broader scope:** once the harness is stable, repeat on Claude Sonnet 4.6 (original plan default) and on SWE-bench-Verified.
+{next_steps_section}
 """
 
 
@@ -699,18 +741,24 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Optional path to the baseline's SWE-bench ``.report.json`` "
+            "Path to the baseline's SWE-bench ``.report.json`` "
             "(produced by ``benchmarks.swebench.eval_infer``). When "
             "supplied, the artifact's summary carries ``pass_at_1`` + "
             "``resolved_count`` + ``unresolved_count`` and per-instance "
-            "rows carry ``baseline_eval_status``."
+            "rows carry ``baseline_eval_status``. "
+            "MUST be supplied alongside ``--treatment-eval-report`` — "
+            "one-sided usage is rejected to avoid asymmetric markdown."
         ),
     )
     parser.add_argument(
         "--treatment-eval-report",
         type=Path,
         default=None,
-        help="Optional path to the treatment's SWE-bench ``.report.json``. See --baseline-eval-report.",
+        help=(
+            "Path to the treatment's SWE-bench ``.report.json``. "
+            "See ``--baseline-eval-report``. MUST be supplied together "
+            "with ``--baseline-eval-report``."
+        ),
     )
     parser.add_argument(
         "--out-json", type=Path, required=True, help="Output path for the JSON artifact."
@@ -722,6 +770,15 @@ def main() -> None:
         help="Optional output path for the markdown writeup. If omitted, no md is written.",
     )
     args = parser.parse_args()
+
+    # Argparse-level pair check so the error surfaces at CLI parse time
+    # with argparse's standard "error: ..." exit code 2, instead of
+    # deep inside ``build_artifact`` (roborev #846 Low).
+    if bool(args.baseline_eval_report) != bool(args.treatment_eval_report):
+        parser.error(
+            "--baseline-eval-report and --treatment-eval-report must be "
+            "supplied together (or neither)."
+        )
 
     baseline_rows = _load_jsonl(_find_output_jsonl(args.baseline))
     treatment_rows = _load_jsonl(_find_output_jsonl(args.treatment))
