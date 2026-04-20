@@ -101,6 +101,47 @@ def test_trailing_path_flag_with_no_value_passes_through_as_is(
     assert out == ["--some-setting", "x", "--prompt-path"]
 
 
+def test_path_flag_followed_by_another_flag_is_not_swallowed(
+    tmp_path: Path,
+) -> None:
+    """Roborev #821 Medium: ``--prompt-path --num-workers 4`` must NOT
+    consume ``--num-workers`` as the path value. argparse convention
+    reserves ``-``-prefixed tokens for flags, so the normalizer leaves
+    the dangling path flag alone and the downstream parser produces
+    its canonical "expected one argument" error.
+    """
+    out = normalize(["--prompt-path", "--num-workers", "4"], tmp_path)
+    assert out == ["--prompt-path", "--num-workers", "4"]
+
+
+def test_path_flag_followed_by_short_flag_is_not_swallowed(
+    tmp_path: Path,
+) -> None:
+    """Short flags (``-v``, ``-h``) also start with ``-`` and must not
+    be consumed as a path value.
+    """
+    out = normalize(["--prompt-path", "-v"], tmp_path)
+    assert out == ["--prompt-path", "-v"]
+
+
+def test_path_flag_followed_by_value_starting_with_dash_is_still_not_swallowed(
+    tmp_path: Path,
+) -> None:
+    """Edge case: a user might genuinely want a file literally named
+    ``-weird.txt``, but argparse couldn't accept it as a positional
+    either. Fail safe — leave the flag untouched; the user can use
+    ``--prompt-path=-weird.txt`` to bypass the heuristic (that path
+    still goes through the ``=`` branch, which does NOT check the
+    leading-dash guard).
+    """
+    out = normalize(["--prompt-path", "-weird.txt"], tmp_path)
+    assert out == ["--prompt-path", "-weird.txt"]
+    # escape hatch: equals-form still normalizes even a dash-leading
+    # value, because the guard only applies to separate-value tokens.
+    out2 = normalize(["--prompt-path=-weird.txt"], tmp_path)
+    assert out2 == [f"--prompt-path={(tmp_path / '-weird.txt').resolve()}"]
+
+
 def test_suffix_match_is_exact_not_substring(tmp_path: Path) -> None:
     """A flag like ``--pathwise`` contains ``path`` but isn't a path
     flag; the matcher uses suffix anchors (``-path`` etc.), so this

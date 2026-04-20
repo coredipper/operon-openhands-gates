@@ -77,9 +77,12 @@ def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> l
     ``.vendor/benchmarks/../x.j2`` after the wrapper's chdir.
 
     Unknown flags pass through untouched. Trailing path-flags with no
-    value pass through as-is so the downstream parser produces a
-    clear error. Matching uses exact suffix anchors, not substring —
-    ``--pathwise`` is not treated as a path flag.
+    value — or path-flags followed by another flag (anything starting
+    with ``-``) — pass through as-is so the downstream argparse
+    produces its canonical "expected one argument" error rather than
+    silently swallowing the following flag. Matching uses exact suffix
+    anchors, not substring — ``--pathwise`` is not treated as a path
+    flag.
     """
     out: list[str] = []
     i = 0
@@ -89,7 +92,11 @@ def _normalize_path_passthrough(passthrough: list[str], original_cwd: Path) -> l
             if "=" in tok:
                 flag, value = tok.split("=", 1)
                 out.append(f"{flag}={(original_cwd / value).resolve()}")
-            elif i + 1 < len(passthrough):
+            elif i + 1 < len(passthrough) and not passthrough[i + 1].startswith("-"):
+                # Only consume the next token if it looks like a value
+                # (argparse convention: values can't start with ``-``).
+                # Otherwise leave the path flag untouched and let the
+                # downstream parser diagnose the missing-value case.
                 flag = tok
                 value = passthrough[i + 1]
                 out.extend([flag, str((original_cwd / value).resolve())])
