@@ -101,9 +101,59 @@ def _final_row(rows: list[dict]) -> dict:
     return max(rows, key=lambda r: r.get("attempt", 1))
 
 
+def _load_eval_report(path: Path) -> dict:
+    """Load a SWE-bench harness ``.report.json`` and normalize the id fields.
+
+    The report is emitted by ``swebench.harness.reporting.make_run_report``
+    (see .venv-experiment/.../swebench/harness/reporting.py:127-143) with
+    fields ``resolved_ids``, ``unresolved_ids``, ``empty_patch_ids``,
+    ``error_ids``, ``incomplete_ids``, ``submitted_ids``, plus the
+    corresponding counts.
+
+    Returns the dict with ``*_ids`` promoted to frozensets for fast
+    ``iid in report["resolved_ids"]`` membership checks.
+    """
+    data = json.loads(path.read_text())
+    for key in (
+        "resolved_ids",
+        "unresolved_ids",
+        "empty_patch_ids",
+        "error_ids",
+        "incomplete_ids",
+        "submitted_ids",
+        "completed_ids",
+    ):
+        if key in data:
+            data[key] = frozenset(data[key])
+    return data
+
+
+def _eval_status_for(iid: str, report: dict | None) -> str | None:
+    """Classify an instance against the eval report.
+
+    Returns one of ``"resolved"``, ``"unresolved"``, ``"empty_patch"``,
+    ``"error"``, ``"incomplete"``, or ``None`` if no report was supplied.
+    Instances that appear in none of the report's id sets fall back to
+    ``"incomplete"`` — they were in the predictions file but the harness
+    didn't complete them for some reason.
+    """
+    if report is None:
+        return None
+    if iid in report.get("resolved_ids", frozenset()):
+        return "resolved"
+    if iid in report.get("unresolved_ids", frozenset()):
+        return "unresolved"
+    if iid in report.get("empty_patch_ids", frozenset()):
+        return "empty_patch"
+    if iid in report.get("error_ids", frozenset()):
+        return "error"
+    return "incomplete"
+
+
 def _aggregate(
     rows: list[dict],
     aborted_retries: set[str],
+    eval_report: dict | None = None,
 ) -> dict:
     by_iid = _by_instance(rows)
     finals = [_final_row(rs) for rs in by_iid.values()]
@@ -161,7 +211,7 @@ def _aggregate(
 
     instances_with_completed_retry = sum(1 for a in max_attempts if a > 1)
 
-    return {
+    summary = {
         "n_instances": len(by_iid),
         "final_patch_len": _safe_agg(patch_lens),
         "final_n_events": _safe_agg(n_events),
@@ -181,6 +231,36 @@ def _aggregate(
         "aborted_retry_instance_ids": aborted_in_scope,
         "max_attempt_histogram": dict(Counter(max_attempts)),
     }
+
+    # pass@1 + eval-status rollup (optional — only populated when the
+    # caller supplied a SWE-bench ``.report.json``). Mirrors
+    # ``scripts/collect_results.py._aggregate``'s convention of emitting
+    # ``pass_at_1: None`` with a note when any instance is unscored,
+    # rather than silently reporting 0.0.
+    if eval_report is not None:
+        statuses = [_eval_status_for(iid, eval_report) for iid in by_iid]
+        n_resolved = sum(1 for s in statuses if s == "resolved")
+        n_unresolved = sum(1 for s in statuses if s == "unresolved")
+        n_empty = sum(1 for s in statuses if s == "empty_patch")
+        n_error = sum(1 for s in statuses if s == "error")
+        n_incomplete = sum(1 for s in statuses if s == "incomplete")
+        summary["resolved_count"] = n_resolved
+        summary["unresolved_count"] = n_unresolved
+        summary["empty_patch_count"] = n_empty
+        summary["error_count"] = n_error
+        summary["incomplete_count"] = n_incomplete
+        if n_incomplete > 0:
+            # Same rule as collect_results.py: any unscored row ⇒
+            # pass@1 is unknown, not silently 0.
+            summary["pass_at_1"] = None
+            summary["pass_at_1_note"] = (
+                f"{n_incomplete}/{len(by_iid)} instances were not "
+                "scored by the eval harness (incomplete)."
+            )
+        else:
+            summary["pass_at_1"] = round(n_resolved / len(by_iid), 4)
+
+    return summary
 
 
 def _validate_aborted_retries(
@@ -224,6 +304,8 @@ def build_artifact(
     treatment_rows: list[dict],
     aborted_treatment_retries: set[str],
     model: str,
+    baseline_eval_report: dict | None = None,
+    treatment_eval_report: dict | None = None,
 ) -> dict:
     base_ids = set(r["instance_id"] for r in baseline_rows)
     treat_ids = set(r["instance_id"] for r in treatment_rows)
@@ -250,8 +332,10 @@ def build_artifact(
             "instance_ids": sorted(base_ids),
         },
         "summary": {
-            "baseline": _aggregate(baseline_rows, set()),
-            "operon_stagnation": _aggregate(treatment_rows, aborted_treatment_retries),
+            "baseline": _aggregate(baseline_rows, set(), baseline_eval_report),
+            "operon_stagnation": _aggregate(
+                treatment_rows, aborted_treatment_retries, treatment_eval_report
+            ),
         },
         "per_instance": [
             {
@@ -271,6 +355,10 @@ def build_artifact(
                 "treatment_final_patch_len": len(
                     (_final_row(by_treat[iid]).get("test_result") or {}).get("git_patch") or ""
                 ),
+                # Eval status — populated only when reports are supplied.
+                # ``None`` signals "not scored" (vs False = unresolved).
+                "baseline_eval_status": _eval_status_for(iid, baseline_eval_report),
+                "treatment_eval_status": _eval_status_for(iid, treatment_eval_report),
             }
             for iid in sorted(base_ids)
         ],
@@ -312,6 +400,20 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
     repo_phrase = " + ".join(f"{n} {r}" for r, n in repo_sorted)
     dominant_repo = repo_sorted[0][0] if repo_sorted else "unknown"
 
+    # Whether the eval step was run (affects columns + prose).
+    has_eval = bs.get("pass_at_1") is not None or "resolved_count" in bs
+
+    def _status_emoji(status: str | None) -> str:
+        if status is None:
+            return "—"
+        return {
+            "resolved": "✅",
+            "unresolved": "❌",
+            "empty_patch": "∅",
+            "error": "⚠️",
+            "incomplete": "?",
+        }.get(status, f"?{status}")
+
     rows = []
     for p in artifact["per_instance"]:
         t_att = p["treatment_max_attempt"]
@@ -324,16 +426,30 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
             if t_att > 1 or t_aborted
             else f"${p['treatment_cumulative_cost_usd']:.2f}"
         )
-        rows.append(
+        line = (
             f"| `{p['instance_id']}` | {p['baseline_max_attempt']} | {att_disp} "
-            f"| ${p['baseline_cumulative_cost_usd']:.2f} | {cost_disp} |"
+            f"| ${p['baseline_cumulative_cost_usd']:.2f} | {cost_disp} "
         )
+        if has_eval:
+            line += (
+                f"| {_status_emoji(p.get('baseline_eval_status'))} "
+                f"| {_status_emoji(p.get('treatment_eval_status'))} "
+            )
+        line += "|"
+        rows.append(line)
 
     caveats = [
         f"**Sample bias.** n={bs['n_instances']}, {repo_phrase}. Original plan called for n=30 alphabetic slice. The Docker-Desktop-on-Mac apt-signature build bug blocked all matplotlib/sympy/flask/pytest instances, leaving a {dominant_repo}-heavy subset. Not representative of full SWE-bench-lite; generalizability limited. Run on a Linux host or OpenHands remote runtime for an unbiased slice.",
-        "**`resolved` not computed.** Both conditions produced non-empty `git_patch` outputs, but the SWE-bench patch-evaluation step (which applies patches and runs `FAIL_TO_PASS` / `PASS_TO_PASS` tests) was not run. The critic-retry delta is a behavioral signal; the underlying pass@1 comparison requires the evaluation pipeline.",
         '**Certificate metadata not serialized.** `OperonStagnationCritic` emits `CriticResult.metadata` with `certificate_theorem="behavioral_stability_windowed"` on stagnation fires. That metadata field is **not captured** in the serialized event history (`critic_result` field on `MessageEvent` / `ActionEvent` is `null` throughout). Known openhands-sdk serialization gap, not a critic bug. Critic firing is inferred from Attempt-2 presence (for completed retries) or from the pinned aborted-retry list (for timed-out ones), not from on-disk certificate records. Fixing this requires either patching the SDK or adding a side-channel log from inside `OperonStagnationCritic.evaluate()`.',
     ]
+    # Only keep the "`resolved` not computed" caveat when the eval
+    # step hasn't been run. When it has, the artifact carries real
+    # pass@1 numbers and the caveat is obsolete.
+    if not has_eval:
+        caveats.insert(
+            1,
+            "**`resolved` not computed.** Both conditions produced non-empty `git_patch` outputs, but the SWE-bench patch-evaluation step (which applies patches and runs `FAIL_TO_PASS` / `PASS_TO_PASS` tests) was not run. The critic-retry delta is a behavioral signal; the underlying pass@1 comparison requires the evaluation pipeline.",
+        )
     if ts["aborted_retries"] > 0:
         aborted_ids = ", ".join(f"`{iid}`" for iid in ts["aborted_retry_instance_ids"])
         caveats.append(
@@ -352,6 +468,81 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
     caveats.extend(extra_caveats or [])
 
     caveats_md = "\n\n".join(f"{i + 1}. {c}" for i, c in enumerate(caveats))
+
+    # Optional pass@1 row + correctness prose. Only rendered when the
+    # eval step was run. Using a helper instead of an inline ternary
+    # because the pass_at_1 formatting needs to handle the "None"
+    # (some-rows-unscored) branch from _aggregate.
+    def _fmt_passk(cond: dict) -> str:
+        p = cond.get("pass_at_1")
+        if p is None:
+            note = cond.get("pass_at_1_note", "not computed")
+            return f"— ({note})"
+        return f"{p * 100:.0f}%"
+
+    if has_eval:
+        # Retry-flip rollup: did treatment retries change the outcome
+        # per instance vs baseline? (improved = unresolved → resolved,
+        # broke = resolved → unresolved).
+        retried_per_instance = [
+            p
+            for p in artifact["per_instance"]
+            if p["treatment_max_attempt"] > 1 or p.get("treatment_retry_aborted")
+        ]
+        flipped_improved = sum(
+            1
+            for p in retried_per_instance
+            if p.get("baseline_eval_status") == "unresolved"
+            and p.get("treatment_eval_status") == "resolved"
+        )
+        flipped_broke = sum(
+            1
+            for p in retried_per_instance
+            if p.get("baseline_eval_status") == "resolved"
+            and p.get("treatment_eval_status") == "unresolved"
+        )
+        # pass@1 delta — only meaningful when both sides have numeric
+        # pass_at_1 values (not None).
+        bp = bs.get("pass_at_1")
+        tp = ts.get("pass_at_1")
+        if bp is None or tp is None:
+            pass_at_1_delta = "—"
+        else:
+            diff_pp = round((tp - bp) * 100)
+            pass_at_1_delta = f"**{diff_pp:+d} pp**"
+        base_resolved = bs.get("resolved_count", "—")
+        treat_resolved = ts.get("resolved_count", "—")
+        base_unresolved = bs.get("unresolved_count", "—")
+        treat_unresolved = ts.get("unresolved_count", "—")
+        pass_at_1_row = (
+            "\n"
+            f"| **pass@1**                      | {_fmt_passk(bs):>8} | {_fmt_passk(ts):>17} | {pass_at_1_delta} |\n"
+            f"| &nbsp;&nbsp;&nbsp;resolved       | {base_resolved:>8} | {treat_resolved:>17} | — |\n"
+            f"| &nbsp;&nbsp;&nbsp;unresolved     | {base_unresolved:>8} | {treat_unresolved:>17} | — |"
+        )
+        n_retried = len(retried_per_instance)
+        retry_flip_line = (
+            f"\n\nRetry-flip accounting (treatment retried {n_retried} instance(s)): "
+            f"**{flipped_improved}** improved (unresolved → resolved), "
+            f"**{flipped_broke}** broke (resolved → unresolved), "
+            f"{n_retried - flipped_improved - flipped_broke} unchanged."
+        )
+    else:
+        pass_at_1_row = ""
+        retry_flip_line = ""
+
+    # Instance-level table header — adds a "Resolved?" column pair
+    # when the eval step was run.
+    if has_eval:
+        instance_table_header = (
+            "| Instance | Base attempts | Treat attempts | Base cost | Treat cost | Base resolved | Treat resolved |\n"
+            "|----------|--------------:|---------------:|----------:|-----------:|:-------------:|:--------------:|"
+        )
+    else:
+        instance_table_header = (
+            "| Instance | Baseline attempts | Treatment attempts | Baseline cost | Treatment cost |\n"
+            "|----------|------------------:|-------------------:|--------------:|---------------:|"
+        )
 
     return f"""# SWE-bench-lite delta: baseline vs OperonStagnationCritic
 
@@ -372,9 +563,9 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
 | Total retry rounds              | {bs["total_retry_rounds"]:>8} | {ts["total_retry_rounds"]:>17} | **+{ts["total_retry_rounds"] - bs["total_retry_rounds"]}** |
 | Cumulative cost (USD)           | ${bs["cumulative_cost_usd"]["total"]:>6.2f} | ${ts["cumulative_cost_usd"]["total"]:>16.2f} | **+{delta_pct}%** (+${delta_total_dollars:.2f}) |
 | Mean final patch length (chars) | {bs["final_patch_len"]["mean"]:>8.0f} | {ts["final_patch_len"]["mean"]:>17.0f} | — |
-| Mean final history events       | {bs["final_n_events"]["mean"]:>8.1f} | {ts["final_n_events"]["mean"]:>17.1f} | — |
+| Mean final history events       | {bs["final_n_events"]["mean"]:>8.1f} | {ts["final_n_events"]["mean"]:>17.1f} | — |{pass_at_1_row}
 
-Per-round budget overhead: {per_round_str}.
+Per-round budget overhead: {per_round_str}.{retry_flip_line}
 
 **Raw artifact:** [`swebench_lite_delta.json`](./swebench_lite_delta.json). Reproduce via `scripts/generate_delta_artifact.py`.
 
@@ -382,14 +573,13 @@ Per-round budget overhead: {per_round_str}.
 
 On the {bs["n_instances"]}-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected the first-attempt patch on {ts["instances_with_rejection"]} of {ts["n_instances"]} instances ({ts["instances_with_rejection_rate"] * 100:.0f}%), producing {ts["total_retry_rounds"]} total retry round(s): {ts["total_completed_retry_rounds"]} completed, {ts["aborted_retries"]} aborted on timeout.
 
-That's a **measurable behavioral delta** — the structural critic reaches different "done" decisions than an LLM-judged critic on the same agent trajectories. The cost is a **+{delta_pct}% budget overhead** for the slice. Whether retries *improve* correctness against the gold fix is not measured here; see caveats.
+That's a **measurable behavioral delta** — the structural critic reaches different "done" decisions than an LLM-judged critic on the same agent trajectories. The cost is a **+{delta_pct}% budget overhead** for the slice.
 
 ## Instance-level table
 
 All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delta.json) `per_instance[*]`.
 
-| Instance | Baseline attempts | Treatment attempts | Baseline cost | Treatment cost |
-|----------|------------------:|-------------------:|--------------:|---------------:|
+{instance_table_header}
 {chr(10).join(rows)}
 
 `1 → aborted 2` = critic rejected Attempt-1, Attempt-2 started but timed out before completion (per-instance `treatment_retry_aborted: true` in the JSON).
@@ -401,21 +591,19 @@ All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delt
 ## What this does and does not prove
 
 **Does:**
-- The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances.
+- The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances, from inference through patch-evaluation.
 - The structural critic exhibits a measurably different rejection pattern from the default LLM critic ({ts["instances_with_rejection_rate"] * 100:.0f}% of instances vs {bs["instances_with_rejection_rate"] * 100:.0f}%).
 - Per-retry-round overhead: {per_round_str}. Full-slice overhead: **+{delta_pct}%**.
 
 **Does not:**
-- Establish whether retries improve patch correctness — that needs the SWE-bench evaluation step.
 - Generalize beyond the selection-biased instance subset (see caveat 1).
-- Provide on-disk certificate evidence (openhands-sdk serialization gap; pending follow-up).
+- Provide on-disk certificate evidence (openhands-sdk serialization gap; see caveat 2).
 
 ## Next steps
 
-1. **Run SWE-bench evaluation** on both `output.jsonl` files to compute per-condition pass@1, resolved counts, `FAIL_TO_PASS` breakdown. This is the number the plan's success criteria calls for.
-2. **Fix the certificate-metadata serialization** so downstream consumers can populate `certificate_emitted`, `certificate_theorem`, `cert_evidence_n` without relying on the retry-count proxy.
-3. **Rerun on a Linux host or `--workspace remote`** to get an unbiased 30-instance slice.
-4. **Broader scope:** once the harness is stable, repeat on Claude Sonnet 4.6 (original plan default) and on SWE-bench-Verified.
+1. **Fix the certificate-metadata serialization** so downstream consumers can populate `certificate_emitted`, `certificate_theorem`, `cert_evidence_n` without relying on the retry-count proxy.
+2. **Rerun on a Linux host or `--workspace remote`** to get an unbiased 30-instance slice.
+3. **Broader scope:** once the harness is stable, repeat on Claude Sonnet 4.6 (original plan default) and on SWE-bench-Verified.
 """
 
 
@@ -442,6 +630,24 @@ def main() -> None:
         "--model", default="openai/gpt-5", help="Model name recorded in the artifact."
     )
     parser.add_argument(
+        "--baseline-eval-report",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to the baseline's SWE-bench ``.report.json`` "
+            "(produced by ``benchmarks.swebench.eval_infer``). When "
+            "supplied, the artifact's summary carries ``pass_at_1`` + "
+            "``resolved_count`` + ``unresolved_count`` and per-instance "
+            "rows carry ``baseline_eval_status``."
+        ),
+    )
+    parser.add_argument(
+        "--treatment-eval-report",
+        type=Path,
+        default=None,
+        help="Optional path to the treatment's SWE-bench ``.report.json``. See --baseline-eval-report.",
+    )
+    parser.add_argument(
         "--out-json", type=Path, required=True, help="Output path for the JSON artifact."
     )
     parser.add_argument(
@@ -455,11 +661,20 @@ def main() -> None:
     baseline_rows = _load_jsonl(_find_output_jsonl(args.baseline))
     treatment_rows = _load_jsonl(_find_output_jsonl(args.treatment))
 
+    baseline_eval_report = (
+        _load_eval_report(args.baseline_eval_report) if args.baseline_eval_report else None
+    )
+    treatment_eval_report = (
+        _load_eval_report(args.treatment_eval_report) if args.treatment_eval_report else None
+    )
+
     artifact = build_artifact(
         baseline_rows,
         treatment_rows,
         set(args.aborted_treatment_retry),
         model=args.model,
+        baseline_eval_report=baseline_eval_report,
+        treatment_eval_report=treatment_eval_report,
     )
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
     args.out_json.write_text(json.dumps(artifact, indent=2) + "\n")

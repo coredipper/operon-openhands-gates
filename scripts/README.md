@@ -109,9 +109,13 @@ Two aggregators, pick by whether you've run the SWE-bench patch-evaluation stage
   --baseline eval/runs/baseline \
   --treatment eval/runs/treatment \
   --aborted-treatment-retry django__django-11019 \
+  --baseline-eval-report eval/runs/baseline/.../output.report.json \
+  --treatment-eval-report eval/runs/treatment/.../output.dedup.report.json \
   --out-json eval/results/swebench_lite_delta.json \
   --out-md eval/results/swebench_lite_delta.md
 ```
+
+Eval-report flags are optional; when supplied (produced by `benchmarks.swebench.eval_infer`; see the **Eval step** section below), the artifact adds `pass_at_1`, per-condition resolved/unresolved counts, per-instance `baseline_eval_status` + `treatment_eval_status`, and a retry-flip accounting line to the markdown. When omitted, output falls back to the infer-only schema.
 
 Emits the markdown writeup alongside a JSON artifact whose `summary` block carries two orthogonal retry metrics:
 
@@ -126,6 +130,35 @@ Emits the markdown writeup alongside a JSON artifact whose `summary` block carri
 Per-instance `per_instance[*]` rows carry `baseline_max_attempt`, `treatment_max_attempt`, `treatment_retry_aborted` (bool), cumulative costs, and final patch lengths.
 
 `--aborted-treatment-retry` is repeatable and marks instances whose treatment Attempt-2 started but didn't complete (e.g. timeout). Unknown IDs or IDs already having a completed retry row raise a validation error (they would otherwise double-count).
+
+### Eval step (populates `pass_at_1`)
+
+SWE-bench's inference pipeline produces patches; the patch-evaluation step runs them against the instance tests. `benchmarks/swebench/eval_infer.py` is the entry point:
+
+```bash
+# Baseline (10 unique instances, use as-is):
+BASE=eval/runs/baseline/princeton-nlp__SWE-bench_Lite-test/openai/gpt-5_sdk_3e0a3a0_maxiter_500
+.venv-experiment/bin/python -m benchmarks.swebench.eval_infer \
+  "$BASE/output.jsonl" \
+  --dataset princeton-nlp/SWE-bench_Lite \
+  --split test \
+  --run-id operon-baseline-n10 \
+  --no-modal --timeout 3600 --workers 4
+
+# Treatment (retries produce duplicate rows; dedupe first):
+TREAT=eval/runs/treatment/princeton-nlp__SWE-bench_Lite-test/openai/gpt-5_sdk_3e0a3a0_maxiter_500
+.venv-experiment/bin/python scripts/dedupe_for_eval.py "$TREAT/output.jsonl" "$TREAT/output.dedup.jsonl"
+.venv-experiment/bin/python -m benchmarks.swebench.eval_infer \
+  "$TREAT/output.dedup.jsonl" \
+  --dataset princeton-nlp/SWE-bench_Lite \
+  --split test \
+  --run-id operon-treatment-n10 \
+  --no-modal --timeout 3600 --workers 4
+```
+
+Each run writes `$INPUT.report.json` next to the input with the harness's resolved/unresolved id lists. Feed both reports back into `generate_delta_artifact.py` via `--baseline-eval-report` / `--treatment-eval-report` to get pass@1 + resolved flags in the artifact.
+
+`scripts/dedupe_for_eval.py` exists because `eval_infer.py` doesn't dedupe rows with the same `instance_id`; under the iterative-refinement loop, the treatment `output.jsonl` carries one row per (instance_id, attempt) pair, and we only want the final critic-accepted patch evaluated.
 
 ### Note on certificate fields
 

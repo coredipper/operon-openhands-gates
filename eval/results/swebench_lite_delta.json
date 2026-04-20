@@ -1,7 +1,7 @@
 {
-  "run_id": "a1f2f019-c485-433d-94c1-bd8090e0e537",
+  "run_id": "2a7ea18b-8ba4-4442-bc1d-a42cead629c5",
   "dataset": "princeton-nlp/SWE-bench_Lite",
-  "timestamp": "2026-04-20T20:47:07.114729+00:00",
+  "timestamp": "2026-04-20T21:22:43.036199+00:00",
   "model": "openai/gpt-5",
   "conditions": [
     "baseline",
@@ -62,7 +62,13 @@
       "aborted_retry_instance_ids": [],
       "max_attempt_histogram": {
         "1": 10
-      }
+      },
+      "resolved_count": 6,
+      "unresolved_count": 4,
+      "empty_patch_count": 0,
+      "error_count": 0,
+      "incomplete_count": 0,
+      "pass_at_1": 0.6
     },
     "operon_stagnation": {
       "n_instances": 10,
@@ -106,7 +112,13 @@
       "max_attempt_histogram": {
         "1": 5,
         "2": 5
-      }
+      },
+      "resolved_count": 6,
+      "unresolved_count": 4,
+      "empty_patch_count": 0,
+      "error_count": 0,
+      "incomplete_count": 0,
+      "pass_at_1": 0.6
     }
   },
   "per_instance": [
@@ -118,7 +130,9 @@
       "baseline_cumulative_cost_usd": 0.2939,
       "treatment_cumulative_cost_usd": 0.2452,
       "baseline_final_patch_len": 809,
-      "treatment_final_patch_len": 809
+      "treatment_final_patch_len": 809,
+      "baseline_eval_status": "resolved",
+      "treatment_eval_status": "resolved"
     },
     {
       "instance_id": "django__django-11001",
@@ -128,7 +142,9 @@
       "baseline_cumulative_cost_usd": 0.4041,
       "treatment_cumulative_cost_usd": 1.0307,
       "baseline_final_patch_len": 1570,
-      "treatment_final_patch_len": 626
+      "treatment_final_patch_len": 626,
+      "baseline_eval_status": "resolved",
+      "treatment_eval_status": "resolved"
     },
     {
       "instance_id": "django__django-11019",
@@ -138,7 +154,9 @@
       "baseline_cumulative_cost_usd": 0.6838,
       "treatment_cumulative_cost_usd": 0.6637,
       "baseline_final_patch_len": 5305,
-      "treatment_final_patch_len": 6380
+      "treatment_final_patch_len": 6380,
+      "baseline_eval_status": "unresolved",
+      "treatment_eval_status": "unresolved"
     },
     {
       "instance_id": "django__django-11099",
@@ -148,7 +166,9 @@
       "baseline_cumulative_cost_usd": 0.237,
       "treatment_cumulative_cost_usd": 0.6525,
       "baseline_final_patch_len": 901,
-      "treatment_final_patch_len": 901
+      "treatment_final_patch_len": 901,
+      "baseline_eval_status": "resolved",
+      "treatment_eval_status": "resolved"
     },
     {
       "instance_id": "django__django-11283",
@@ -158,7 +178,9 @@
       "baseline_cumulative_cost_usd": 0.3952,
       "treatment_cumulative_cost_usd": 0.6586,
       "baseline_final_patch_len": 2989,
-      "treatment_final_patch_len": 2549
+      "treatment_final_patch_len": 2549,
+      "baseline_eval_status": "unresolved",
+      "treatment_eval_status": "unresolved"
     },
     {
       "instance_id": "django__django-11564",
@@ -168,7 +190,9 @@
       "baseline_cumulative_cost_usd": 0.8069,
       "treatment_cumulative_cost_usd": 0.627,
       "baseline_final_patch_len": 2671,
-      "treatment_final_patch_len": 2017
+      "treatment_final_patch_len": 2017,
+      "baseline_eval_status": "unresolved",
+      "treatment_eval_status": "unresolved"
     },
     {
       "instance_id": "django__django-11815",
@@ -178,7 +202,9 @@
       "baseline_cumulative_cost_usd": 0.4288,
       "treatment_cumulative_cost_usd": 0.9383,
       "baseline_final_patch_len": 1552,
-      "treatment_final_patch_len": 1103
+      "treatment_final_patch_len": 1103,
+      "baseline_eval_status": "unresolved",
+      "treatment_eval_status": "unresolved"
     },
     {
       "instance_id": "django__django-11848",
@@ -188,7 +214,9 @@
       "baseline_cumulative_cost_usd": 0.3294,
       "treatment_cumulative_cost_usd": 0.3729,
       "baseline_final_patch_len": 935,
-      "treatment_final_patch_len": 1111
+      "treatment_final_patch_len": 1111,
+      "baseline_eval_status": "resolved",
+      "treatment_eval_status": "resolved"
     },
     {
       "instance_id": "django__django-11964",
@@ -198,7 +226,9 @@
       "baseline_cumulative_cost_usd": 0.3932,
       "treatment_cumulative_cost_usd": 0.3912,
       "baseline_final_patch_len": 759,
-      "treatment_final_patch_len": 577
+      "treatment_final_patch_len": 577,
+      "baseline_eval_status": "resolved",
+      "treatment_eval_status": "resolved"
     },
     {
       "instance_id": "django__django-11999",
@@ -208,7 +238,9 @@
       "baseline_cumulative_cost_usd": 0.2374,
       "treatment_cumulative_cost_usd": 1.0002,
       "baseline_final_patch_len": 896,
-      "treatment_final_patch_len": 1050
+      "treatment_final_patch_len": 1050,
+      "baseline_eval_status": "resolved",
+      "treatment_eval_status": "resolved"
     }
   ]
 }
