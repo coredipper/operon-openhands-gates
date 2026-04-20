@@ -10,21 +10,22 @@
 | Metric                          | Baseline | Operon stagnation | Δ          |
 |---------------------------------|---------:|------------------:|-----------:|
 | Instances                       |       10 |                10 | —          |
-| Critic rejections               |        0 |                 6 | **+6** |
-| &nbsp;&nbsp;&nbsp;completed retries | — |                 5 | — |
-| &nbsp;&nbsp;&nbsp;aborted retries (timeout) | — |                 1 | — |
-| Critic-rejection rate           |       0% |               60% | **+60 pp** |
+| Instances with ≥1 rejection     |        0 |                 6 | **+6** |
+| &nbsp;&nbsp;&nbsp;with completed retry | — |                 5 | — |
+| &nbsp;&nbsp;&nbsp;with aborted retry (timeout) | — |                 1 | — |
+| Per-instance rejection rate     |       0% |               60% | **+60 pp** |
+| Total retry rounds              |        0 |                 6 | **+6** |
 | Cumulative cost (USD)           | $  4.21 | $            6.58 | **+56%** (+$2.37) |
 | Mean final patch length (chars) |     1839 |              1712 | — |
 | Mean final history events       |     80.3 |              80.6 | — |
 
-Per-rejection budget overhead: **$0.47** per completed retry (= total cost delta / completed_retries; aborted retries excluded to avoid bias from undercounted spend).
+Per-round budget overhead: **$0.47** per completed retry round (= total cost delta / total_completed_retry_rounds; aborted retries excluded to avoid bias from undercounted spend).
 
 **Raw artifact:** [`swebench_lite_delta.json`](./swebench_lite_delta.json). Reproduce via `scripts/generate_delta_artifact.py`.
 
 ## What the critic did
 
-On the 10-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected 6 of 10 first-attempt patches (60%): 5 triggered a second refinement iteration that completed, and 1 triggered a retry that timed out before completing.
+On the 10-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected the first-attempt patch on 6 of 10 instances (60%), producing 6 total retry round(s): 5 completed, 1 aborted on timeout.
 
 That's a **measurable behavioral delta** — the structural critic reaches different "done" decisions than an LLM-judged critic on the same agent trajectories. The cost is a **+56% budget overhead** for the slice. Whether retries *improve* correctness against the gold fix is not measured here; see caveats.
 
@@ -63,8 +64,8 @@ All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delt
 
 **Does:**
 - The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances.
-- The structural critic exhibits a measurably different rejection pattern from the default LLM critic (60% vs 0%).
-- Per-completed-retry overhead: **$0.47** per completed retry (= total cost delta / completed_retries; aborted retries excluded to avoid bias from undercounted spend). Full-slice overhead: **+56%**.
+- The structural critic exhibits a measurably different rejection pattern from the default LLM critic (60% of instances vs 0%).
+- Per-retry-round overhead: **$0.47** per completed retry round (= total cost delta / total_completed_retry_rounds; aborted retries excluded to avoid bias from undercounted spend). Full-slice overhead: **+56%**.
 
 **Does not:**
 - Establish whether retries improve patch correctness — that needs the SWE-bench evaluation step.

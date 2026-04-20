@@ -125,25 +125,41 @@ def _aggregate(
     n_events = [len(r.get("history") or []) for r in finals]
     max_attempts = [max(r.get("attempt", 1) for r in rs) for rs in by_iid.values()]
 
-    # Retry accounting — roborev #837 Medium 1. Distinguish:
-    # - ``instances_with_completed_retry``: count of instances where
-    #   max_attempt > 1 (at least one critic-rejection-and-retry loop
-    #   closed successfully). This is what scales the retry rate.
-    # - ``total_completed_retries``: actual count of retry rounds
-    #   across instances — ``(max_attempt - 1)`` summed. Matters when
-    #   an instance reaches attempt=3 or higher (2+ retries on that
-    #   single instance). In this slice every retried instance
-    #   completed exactly one retry, so the two numbers coincide,
-    #   but the denominator for the per-retry cost figure should
-    #   divide by total retries, not instances-with-retry, to stay
-    #   correct under higher-attempt runs.
-    instances_with_completed_retry = sum(1 for a in max_attempts if a > 1)
-    total_completed_retries = sum(a - 1 for a in max_attempts if a > 1)
+    # Retry accounting — roborev #837/#838. Two orthogonal metrics:
+    #
+    # - **Per-instance**: how many *instances* had ≥1 rejection (either
+    #   a completed retry or an aborted one)? This is the headline
+    #   rate the writeup quotes as "rejected X of N first-attempt
+    #   patches (Y%)"; always in [0, 1].
+    #
+    # - **Per-round**: how many total retry *rounds* happened across
+    #   the slice — ``sum(max_attempt - 1)`` for completed rounds plus
+    #   one per aborted retry. This is the denominator for the
+    #   per-retry cost metric. Under attempt >= 3 it exceeds the
+    #   per-instance count (a 2-retry instance contributes 2 to rounds
+    #   but 1 to instances).
+    #
+    # The old ``critic_rejections`` / ``critic_rejection_rate`` was
+    # overloaded to mean rounds, but the markdown treated it as a
+    # per-instance rate (producing nonsensical ">100%" under heavy
+    # retry). Split cleanly now.
     aborted_in_scope = sorted(aborted_retries & set(by_iid.keys()))
-    # ``critic_rejections`` = total retry rounds (completed + aborted).
-    # Each aborted retry is one rejection; we can't count multiple
-    # aborted rounds per instance since no row is written.
-    critic_rejections = total_completed_retries + len(aborted_in_scope)
+    aborted_set = set(aborted_in_scope)
+
+    # Per-instance rejection metric (used for headline rate + prose):
+    # an instance is "rejected" iff it had a completed retry OR is in
+    # the aborted-retry list. Each instance contributes at most 1.
+    instances_with_rejection = sum(
+        1
+        for iid, rows_for in by_iid.items()
+        if max(r.get("attempt", 1) for r in rows_for) > 1 or iid in aborted_set
+    )
+
+    # Per-round totals (used for the $/retry cost denominator):
+    total_completed_retry_rounds = sum(a - 1 for a in max_attempts if a > 1)
+    total_retry_rounds = total_completed_retry_rounds + len(aborted_in_scope)
+
+    instances_with_completed_retry = sum(1 for a in max_attempts if a > 1)
 
     return {
         "n_instances": len(by_iid),
@@ -153,9 +169,13 @@ def _aggregate(
         "cumulative_prompt_tokens": {"total": sum(cum_prompt), **_safe_agg(cum_prompt)},
         "cumulative_completion_tokens": {"total": sum(cum_comp), **_safe_agg(cum_comp)},
         "cumulative_reasoning_tokens": {"total": sum(cum_reason), **_safe_agg(cum_reason)},
-        "critic_rejections": critic_rejections,
-        "critic_rejection_rate": round(critic_rejections / len(by_iid), 3),
-        "completed_retries": total_completed_retries,
+        # Per-instance (headline rate — always in [0, 1]):
+        "instances_with_rejection": instances_with_rejection,
+        "instances_with_rejection_rate": round(instances_with_rejection / len(by_iid), 3),
+        # Per-round (cost-denominator):
+        "total_retry_rounds": total_retry_rounds,
+        "total_completed_retry_rounds": total_completed_retry_rounds,
+        # Breakdown:
         "instances_with_completed_retry": instances_with_completed_retry,
         "aborted_retries": len(aborted_in_scope),
         "aborted_retry_instance_ids": aborted_in_scope,
@@ -271,17 +291,19 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
     )
     # Per-completed-retry cost: excludes aborted retries from the
     # denominator to avoid bias from their undercounted spend
-    # (roborev #835 Medium 1). If there are no completed retries,
-    # report "—" rather than divide by zero.
-    per_completed = (
-        round(delta_total_dollars / ts["completed_retries"], 2)
-        if ts["completed_retries"] > 0
+    # (roborev #835 Medium 1). Uses total retry rounds (not
+    # instances-with-retry) so an attempt=3 instance contributes 2
+    # rounds, not 1 (roborev #837 Medium 1). Report "—" if no
+    # completed retry rounds.
+    per_round = (
+        round(delta_total_dollars / ts["total_completed_retry_rounds"], 2)
+        if ts["total_completed_retry_rounds"] > 0
         else None
     )
-    per_completed_str = (
-        f"**${per_completed:.2f}** per completed retry "
-        f"(= total cost delta / completed_retries; aborted retries excluded to avoid bias from undercounted spend)"
-        if per_completed is not None
+    per_round_str = (
+        f"**${per_round:.2f}** per completed retry round "
+        f"(= total cost delta / total_completed_retry_rounds; aborted retries excluded to avoid bias from undercounted spend)"
+        if per_round is not None
         else "—"
     )
 
@@ -343,21 +365,22 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
 | Metric                          | Baseline | Operon stagnation | Δ          |
 |---------------------------------|---------:|------------------:|-----------:|
 | Instances                       | {bs["n_instances"]:>8} | {ts["n_instances"]:>17} | —          |
-| Critic rejections               | {bs["critic_rejections"]:>8} | {ts["critic_rejections"]:>17} | **+{ts["critic_rejections"]}** |
-| &nbsp;&nbsp;&nbsp;completed retries | — | {ts["completed_retries"]:>17} | — |
-| &nbsp;&nbsp;&nbsp;aborted retries (timeout) | — | {ts["aborted_retries"]:>17} | — |
-| Critic-rejection rate           | {bs["critic_rejection_rate"] * 100:>7.0f}% | {ts["critic_rejection_rate"] * 100:>16.0f}% | **+{(ts["critic_rejection_rate"] - bs["critic_rejection_rate"]) * 100:.0f} pp** |
+| Instances with ≥1 rejection     | {bs["instances_with_rejection"]:>8} | {ts["instances_with_rejection"]:>17} | **+{ts["instances_with_rejection"] - bs["instances_with_rejection"]}** |
+| &nbsp;&nbsp;&nbsp;with completed retry | — | {ts["instances_with_completed_retry"]:>17} | — |
+| &nbsp;&nbsp;&nbsp;with aborted retry (timeout) | — | {ts["aborted_retries"]:>17} | — |
+| Per-instance rejection rate     | {bs["instances_with_rejection_rate"] * 100:>7.0f}% | {ts["instances_with_rejection_rate"] * 100:>16.0f}% | **+{(ts["instances_with_rejection_rate"] - bs["instances_with_rejection_rate"]) * 100:.0f} pp** |
+| Total retry rounds              | {bs["total_retry_rounds"]:>8} | {ts["total_retry_rounds"]:>17} | **+{ts["total_retry_rounds"] - bs["total_retry_rounds"]}** |
 | Cumulative cost (USD)           | ${bs["cumulative_cost_usd"]["total"]:>6.2f} | ${ts["cumulative_cost_usd"]["total"]:>16.2f} | **+{delta_pct}%** (+${delta_total_dollars:.2f}) |
 | Mean final patch length (chars) | {bs["final_patch_len"]["mean"]:>8.0f} | {ts["final_patch_len"]["mean"]:>17.0f} | — |
 | Mean final history events       | {bs["final_n_events"]["mean"]:>8.1f} | {ts["final_n_events"]["mean"]:>17.1f} | — |
 
-Per-rejection budget overhead: {per_completed_str}.
+Per-round budget overhead: {per_round_str}.
 
 **Raw artifact:** [`swebench_lite_delta.json`](./swebench_lite_delta.json). Reproduce via `scripts/generate_delta_artifact.py`.
 
 ## What the critic did
 
-On the {bs["n_instances"]}-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected {ts["critic_rejections"]} of {ts["n_instances"]} first-attempt patches ({ts["critic_rejection_rate"] * 100:.0f}%): {ts["completed_retries"]} triggered a second refinement iteration that completed, and {ts["aborted_retries"]} triggered a retry that timed out before completing.
+On the {bs["n_instances"]}-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected the first-attempt patch on {ts["instances_with_rejection"]} of {ts["n_instances"]} instances ({ts["instances_with_rejection_rate"] * 100:.0f}%), producing {ts["total_retry_rounds"]} total retry round(s): {ts["total_completed_retry_rounds"]} completed, {ts["aborted_retries"]} aborted on timeout.
 
 That's a **measurable behavioral delta** — the structural critic reaches different "done" decisions than an LLM-judged critic on the same agent trajectories. The cost is a **+{delta_pct}% budget overhead** for the slice. Whether retries *improve* correctness against the gold fix is not measured here; see caveats.
 
@@ -379,8 +402,8 @@ All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delt
 
 **Does:**
 - The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances.
-- The structural critic exhibits a measurably different rejection pattern from the default LLM critic ({ts["critic_rejection_rate"] * 100:.0f}% vs {bs["critic_rejection_rate"] * 100:.0f}%).
-- Per-completed-retry overhead: {per_completed_str}. Full-slice overhead: **+{delta_pct}%**.
+- The structural critic exhibits a measurably different rejection pattern from the default LLM critic ({ts["instances_with_rejection_rate"] * 100:.0f}% of instances vs {bs["instances_with_rejection_rate"] * 100:.0f}%).
+- Per-retry-round overhead: {per_round_str}. Full-slice overhead: **+{delta_pct}%**.
 
 **Does not:**
 - Establish whether retries improve patch correctness — that needs the SWE-bench evaluation step.

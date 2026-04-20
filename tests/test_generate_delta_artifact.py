@@ -49,8 +49,11 @@ def _row(instance_id: str, attempt: int = 1, cost: float = 0.1) -> dict:
 # ---- #837 Medium 1: retry counts scale with attempt number ----------------
 
 
-def test_aggregate_completed_retries_counts_retry_rounds_not_instances() -> None:
-    """Instance with max_attempt=3 contributes 2 retries, not 1."""
+def test_aggregate_splits_per_instance_vs_per_round_metrics() -> None:
+    """Roborev #838: per-instance rate stays in [0, 1] even when an
+    instance has attempt=3 (2 retry rounds). Per-round total grows
+    with retry depth; per-instance count is capped at 1 per instance.
+    """
     rows = [
         _row("a", attempt=1),
         _row("b", attempt=1),
@@ -60,20 +63,20 @@ def test_aggregate_completed_retries_counts_retry_rounds_not_instances() -> None
         _row("c", attempt=3),
     ]
     agg = gen._aggregate(rows, set())
-    # b contributes 1 retry (attempt 2), c contributes 2 (attempts 2+3)
-    assert agg["completed_retries"] == 3
+    # Per-round: b contributes 1 (attempt 2), c contributes 2 (attempts 2+3)
+    assert agg["total_completed_retry_rounds"] == 3
+    assert agg["total_retry_rounds"] == 3  # no aborts
+    # Per-instance: 2 of 3 instances (b, c) had ≥1 retry; a had none.
     assert agg["instances_with_completed_retry"] == 2
-    # critic_rejections = total retry rounds (aborted + completed)
-    assert agg["critic_rejections"] == 3
-    # rate is per-instance (retries/n_instances): 3/3 = 1.0 (every
-    # instance... no wait, 2/3 had retries, but 3 rounds total
-    # divided by 3 instances = 1.0 "rejections per instance on average")
-    assert agg["critic_rejection_rate"] == 1.0
+    assert agg["instances_with_rejection"] == 2
+    assert agg["instances_with_rejection_rate"] == round(2 / 3, 3)  # 0.667, always ≤ 1
+    # Histogram captures the depth distribution
+    assert agg["max_attempt_histogram"] == {1: 1, 2: 1, 3: 1}
 
 
-def test_aggregate_retry_counts_match_when_all_max_attempt_is_2() -> None:
-    """The common case in this repo: every retried instance completed
-    exactly one retry. ``completed_retries == instances_with_completed_retry``.
+def test_aggregate_retry_counts_coincide_when_all_max_attempt_is_2() -> None:
+    """The common case: every retried instance stopped at attempt=2 —
+    per-round == per-instance.
     """
     rows = [
         _row("a", attempt=1),
@@ -83,16 +86,23 @@ def test_aggregate_retry_counts_match_when_all_max_attempt_is_2() -> None:
         _row("c", attempt=2),
     ]
     agg = gen._aggregate(rows, set())
-    assert agg["completed_retries"] == 2
+    assert agg["total_completed_retry_rounds"] == 2
     assert agg["instances_with_completed_retry"] == 2
+    assert agg["instances_with_rejection"] == 2
 
 
-def test_aggregate_aborted_retries_add_to_rejections() -> None:
+def test_aggregate_aborted_retries_count_per_instance_and_per_round() -> None:
+    """An aborted retry adds 1 to both per-instance and per-round
+    (we can't observe more than one aborted round per instance since
+    no row is written).
+    """
     rows = [_row("a", attempt=1), _row("b", attempt=1)]
     agg = gen._aggregate(rows, {"b"})
-    assert agg["completed_retries"] == 0
+    assert agg["total_completed_retry_rounds"] == 0
     assert agg["aborted_retries"] == 1
-    assert agg["critic_rejections"] == 1
+    assert agg["total_retry_rounds"] == 1
+    assert agg["instances_with_rejection"] == 1
+    assert agg["instances_with_rejection_rate"] == 0.5
     assert agg["aborted_retry_instance_ids"] == ["b"]
 
 
@@ -140,9 +150,10 @@ def test_build_artifact_happy_path() -> None:
     ]
     artifact = gen.build_artifact(baseline, treatment, set(), model="openai/gpt-5")
     assert artifact["conditions"] == ["baseline", "operon_stagnation"]
-    assert artifact["summary"]["baseline"]["completed_retries"] == 0
-    assert artifact["summary"]["operon_stagnation"]["completed_retries"] == 1
+    assert artifact["summary"]["baseline"]["total_completed_retry_rounds"] == 0
+    assert artifact["summary"]["operon_stagnation"]["total_completed_retry_rounds"] == 1
     assert artifact["summary"]["operon_stagnation"]["instances_with_completed_retry"] == 1
+    assert artifact["summary"]["operon_stagnation"]["instances_with_rejection"] == 1
     assert artifact["scope"]["n_instances"] == 2
 
 
@@ -151,3 +162,37 @@ def test_build_artifact_rejects_instance_set_mismatch() -> None:
     treatment = [_row("b", attempt=1)]  # different ID
     with pytest.raises(ValueError, match="instance_id set mismatch"):
         gen.build_artifact(baseline, treatment, set(), model="openai/gpt-5")
+
+
+# ---- #838 Medium: markdown renders sane numbers under attempt >= 3 --------
+
+
+def test_markdown_per_instance_rate_stays_in_range_with_attempt_3() -> None:
+    """Roborev #838: a run with attempt >= 3 instances must not produce
+    a ">100%" rejection-rate in the markdown. The per-instance rate
+    (used for the headline prose + percentage) is capped by design;
+    per-round totals live in a separate field.
+    """
+    baseline = [_row("a", attempt=1), _row("b", attempt=1), _row("c", attempt=1)]
+    treatment = [
+        _row("a", attempt=1),
+        _row("b", attempt=1),
+        _row("b", attempt=2),
+        _row("c", attempt=1),
+        _row("c", attempt=2),
+        _row("c", attempt=3),
+    ]
+    artifact = gen.build_artifact(baseline, treatment, set(), model="openai/gpt-5")
+    md = gen.generate_markdown(artifact)
+    # 2 of 3 instances had rejections → 67%. Per-round total is 3.
+    assert "67%" in md
+    assert "rejected the first-attempt patch on 2 of 3 instances" in md
+    assert "producing 3 total retry round(s)" in md
+    # Rejection-rate row + prose should show 67%, not 100% — the old
+    # bug was that the rate field was divided by n_instances but could
+    # exceed n_instances under attempt>=3. Cost-overhead percentages
+    # can legitimately exceed 100% and are not checked here.
+    rate_row_lines = [ln for ln in md.splitlines() if "Per-instance rejection rate" in ln]
+    assert rate_row_lines, "markdown missing per-instance rejection rate row"
+    assert "67%" in rate_row_lines[0]
+    assert "100%" not in rate_row_lines[0]
