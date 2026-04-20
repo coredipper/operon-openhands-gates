@@ -35,5 +35,6 @@ htmlcov/
 .env
 .venv-experiment/
 scripts/llm.json
+# Eval run artifacts (large logs, conversations, not committed; only eval/results/ is)
 eval/runs/
 .vendor/
