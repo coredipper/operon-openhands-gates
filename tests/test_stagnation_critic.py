@@ -90,6 +90,24 @@ def test_metadata_includes_certificate_theorem_once_fired() -> None:
     assert last.metadata.get("certificate_source") == ("operon_openhands_gates.stagnation_critic")
 
 
+def test_metadata_carries_cert_evidence_n_once_fired() -> None:
+    """Regression for roborev #813 Medium.
+
+    Downstream artifact collectors read ``cert_evidence_n`` from the
+    CriticResult metadata — not from the certificate's parameters,
+    which the benchmarks runner doesn't serialize verbatim. The critic
+    must surface the evidence-window length explicitly. Equals
+    ``critical_duration`` by construction.
+    """
+    critic = _make_critic()
+    last: CriticResult | None = None
+    for _ in range(6):
+        last = critic.evaluate([_agent_msg("loop loop loop")])
+    assert last is not None
+    assert last.metadata is not None
+    assert last.metadata.get("cert_evidence_n") == critic.critical_duration
+
+
 def test_certificate_captures_replayable_instability_evidence() -> None:
     critic = _make_critic()
     for _ in range(6):
