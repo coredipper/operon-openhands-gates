@@ -669,3 +669,125 @@ def test_markdown_keeps_old_caveat_when_no_cert_evidence() -> None:
     assert "Certificates emitted" not in md
     assert "Certificate metadata not serialized" in md
     assert "Treat cert" not in md
+
+
+# ---- _load_all_attempt_rows (roborev #851 Low): cross-attempt cost accounting ----
+
+
+def _write_run_dir(
+    tmp_path: Path,
+    output_rows: list[dict],
+    critic_attempt_rows: dict[int, list[dict]] | None = None,
+) -> Path:
+    """Build a minimal run directory matching the benchmarks runner layout.
+
+    ``output_rows`` is written to ``output.jsonl`` (one per line).
+    ``critic_attempt_rows[N]`` is written to ``output.critic_attempt_<N>.jsonl``.
+    Returns the parent directory passed to ``_load_all_attempt_rows``
+    (the helper uses ``rglob('output.jsonl')`` so a nested subdir is fine).
+    """
+    run_dir = tmp_path / "run" / "nested" / "subdir"
+    run_dir.mkdir(parents=True)
+    (run_dir / "output.jsonl").write_text("\n".join(json.dumps(r) for r in output_rows) + "\n")
+    for n, rows in (critic_attempt_rows or {}).items():
+        (run_dir / f"output.critic_attempt_{n}.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n"
+        )
+    return tmp_path / "run"
+
+
+def test_load_all_attempt_rows_falls_back_when_no_attempt_files(tmp_path: Path) -> None:
+    """No critic_attempt files → return output.jsonl rows as-is.
+    Back-compat with pre-iterative-refinement runs.
+    """
+    output_rows = [_row("a", attempt=1), _row("b", attempt=2)]
+    run_dir = _write_run_dir(tmp_path, output_rows)
+    rows = gen._load_all_attempt_rows(run_dir)
+    assert len(rows) == 2
+    assert {r["instance_id"] for r in rows} == {"a", "b"}
+
+
+def test_load_all_attempt_rows_unions_when_output_is_consolidated(tmp_path: Path) -> None:
+    """v0.1.0a3-style: ``output.jsonl`` holds one row per instance (max attempt),
+    but the critic_attempt files hold the full per-attempt breakdown. Union
+    is used for cost accounting; output.jsonl defines scope.
+    """
+    output_rows = [
+        _row("a", attempt=1),  # max_attempt=1
+        _row("b", attempt=3),  # max_attempt=3
+    ]
+    critic = {
+        1: [_row("a", attempt=1, cost=0.1), _row("b", attempt=1, cost=0.2)],
+        2: [_row("b", attempt=2, cost=0.3)],
+        3: [_row("b", attempt=3, cost=0.4)],
+    }
+    run_dir = _write_run_dir(tmp_path, output_rows, critic)
+    rows = gen._load_all_attempt_rows(run_dir)
+    # 4 per-attempt rows total (a@1 + b@1/2/3)
+    assert len(rows) == 4
+    # Total cost sums correctly across attempts
+    total = sum((r.get("metrics") or {}).get("accumulated_cost", 0) for r in rows)
+    assert round(total, 4) == 1.0
+
+
+def test_load_all_attempt_rows_filters_out_of_scope_instances(tmp_path: Path) -> None:
+    """Baseline's critic_attempt_*.jsonl may contain instances that errored
+    out of ``output.jsonl`` (e.g. Docker build failures on n=30 slice where
+    only 10 survive). Those must NOT appear in the union, or the delta
+    scope would silently expand.
+    """
+    output_rows = [_row("kept", attempt=1)]
+    critic = {
+        1: [_row("kept", attempt=1), _row("errored_out", attempt=1)],
+        2: [_row("errored_out", attempt=2)],
+    }
+    run_dir = _write_run_dir(tmp_path, output_rows, critic)
+    rows = gen._load_all_attempt_rows(run_dir)
+    assert {r["instance_id"] for r in rows} == {"kept"}
+
+
+def test_load_all_attempt_rows_dedupes_on_instance_id_and_attempt(tmp_path: Path) -> None:
+    """Roborev #851 Medium: a reused output dir might have appended
+    duplicate ``(instance_id, attempt)`` rows. Dedup (last-seen wins)
+    so cost/token totals aren't silently double-counted.
+    """
+    output_rows = [_row("a", attempt=1)]
+    # Two rows for (a, 1) — higher-N file wins (lexicographic file order).
+    critic = {
+        1: [_row("a", attempt=1, cost=0.10)],
+        2: [_row("a", attempt=1, cost=0.99)],  # stale duplicate in critic_attempt_2 by mistake
+    }
+    run_dir = _write_run_dir(tmp_path, output_rows, critic)
+    # Max attempt in union is 1 (both rows are attempt=1), matches output.jsonl's attempt=1.
+    rows = gen._load_all_attempt_rows(run_dir)
+    assert len(rows) == 1  # dedup'd from 2 to 1
+    # Last-seen wins: the critic_attempt_2 duplicate supersedes critic_attempt_1.
+    assert (rows[0].get("metrics") or {}).get("accumulated_cost") == 0.99
+
+
+def test_load_all_attempt_rows_rejects_max_attempt_mismatch(tmp_path: Path) -> None:
+    """Roborev #851 Medium: if output.jsonl says max_attempt=3 but the
+    critic_attempt union only goes up to 2 (e.g. the N=3 file was
+    deleted or never written), fail fast rather than produce a
+    silently-undercounted artifact.
+    """
+    output_rows = [_row("a", attempt=3)]  # output.jsonl claims max attempt=3
+    critic = {
+        1: [_row("a", attempt=1)],
+        2: [_row("a", attempt=2)],
+        # No attempt_3 file — mismatch.
+    }
+    run_dir = _write_run_dir(tmp_path, output_rows, critic)
+    with pytest.raises(ValueError, match="max-attempt mismatches"):
+        gen._load_all_attempt_rows(run_dir)
+
+
+def test_load_all_attempt_rows_rejects_instance_missing_from_union(tmp_path: Path) -> None:
+    """output.jsonl has instance 'b' but no critic_attempt file contains
+    it. Fail rather than report a spuriously zero cost for 'b'.
+    """
+    output_rows = [_row("a", attempt=1), _row("b", attempt=1)]
+    critic = {1: [_row("a", attempt=1)]}  # 'b' missing
+    run_dir = _write_run_dir(tmp_path, output_rows, critic)
+    with pytest.raises(ValueError, match="absent from all critic_attempt"):
+        gen._load_all_attempt_rows(run_dir)

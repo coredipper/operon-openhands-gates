@@ -72,7 +72,7 @@ def _load_jsonl(p: Path) -> list[dict]:
 
 
 def _load_all_attempt_rows(run_dir: Path) -> list[dict]:
-    """Load rows spanning every critic attempt, scoped to successful instances.
+    """Load rows spanning every critic attempt, scoped + validated against output.jsonl.
 
     The benchmarks runner's ``output.jsonl`` writes differ across
     versions: some keep every ``(instance_id, attempt)`` row, others
@@ -81,11 +81,21 @@ def _load_all_attempt_rows(run_dir: Path) -> list[dict]:
     ``output.jsonl``.
 
     Per-attempt rows are preserved in ``output.critic_attempt_<N>.jsonl``
-    files. This helper unions those files but filters to instances
-    present in ``output.jsonl`` — the critic_attempt files may include
-    instances that errored out of the final set (e.g. Docker build
-    failures), and including them would expand the scope beyond the
-    successful slice.
+    files. This helper unions those files, scopes to instances
+    present in ``output.jsonl``, then validates the union:
+
+    - **Dedup on ``(instance_id, attempt)``** (roborev #851 Medium):
+      a reused output dir or a rerun of the same critic attempt could
+      append fresh rows without overwriting the old ones, silently
+      double-counting cost/tokens. Keep the last-seen row for each
+      ``(instance_id, attempt)`` pair.
+    - **Consistency check against output.jsonl**: every
+      ``instance_id`` in ``output.jsonl`` must have at least one row
+      in the attempt-file union, and the max ``attempt`` found in the
+      union must equal the ``attempt`` value on the corresponding
+      ``output.jsonl`` row. A mismatch (stale output.jsonl, missing
+      attempt_N file, or a partially-regenerated rerun) raises
+      rather than producing an artifact with silently-skewed totals.
 
     If no ``critic_attempt_*`` files exist, falls back to ``output.jsonl``
     (older runs had multi-attempt rows there directly).
@@ -95,15 +105,60 @@ def _load_all_attempt_rows(run_dir: Path) -> list[dict]:
     attempt_files = sorted(parent.glob("output.critic_attempt_*.jsonl"))
     if not attempt_files:
         return _load_jsonl(output_jsonl)
-    # Scope = successful instance set from output.jsonl.
-    scope_ids = {r["instance_id"] for r in _load_jsonl(output_jsonl)}
-    rows: list[dict] = []
+
+    scope_rows = _load_jsonl(output_jsonl)
+    scope_ids = {r["instance_id"] for r in scope_rows}
+    scope_max_attempt: dict[str, int] = {r["instance_id"]: r.get("attempt", 1) for r in scope_rows}
+
+    # Keyed dedup — last row wins per (instance_id, attempt). File order
+    # is lexicographic on ``critic_attempt_<N>.jsonl``, so later N
+    # supersedes earlier N if duplicates exist.
+    by_key: dict[tuple[str, int], dict] = {}
     for f in attempt_files:
         for line in f.open():
             r = json.loads(line)
-            if r.get("instance_id") in scope_ids:
-                rows.append(r)
-    return rows
+            iid = r.get("instance_id")
+            if iid not in scope_ids:
+                continue
+            key = (iid, r.get("attempt", 1))
+            by_key[key] = r
+
+    # Consistency check: for every instance in scope, the max attempt
+    # in the union must match the attempt on the output.jsonl row.
+    union_max_attempt: dict[str, int] = {}
+    for (iid, attempt), _row in by_key.items():
+        union_max_attempt[iid] = max(union_max_attempt.get(iid, 0), attempt)
+    mismatches = []
+    missing_in_union = []
+    for iid, scope_att in scope_max_attempt.items():
+        if iid not in union_max_attempt:
+            missing_in_union.append(iid)
+            continue
+        if union_max_attempt[iid] != scope_att:
+            mismatches.append(
+                f"    {iid}: output.jsonl has attempt={scope_att}, "
+                f"critic_attempt_* union max attempt={union_max_attempt[iid]}"
+            )
+    if missing_in_union or mismatches:
+        lines = [
+            f"attempt-file union is inconsistent with output.jsonl in {run_dir!s}:",
+        ]
+        if missing_in_union:
+            lines.append(
+                "  instances in output.jsonl but absent from all critic_attempt_*.jsonl: "
+                + ", ".join(missing_in_union)
+            )
+        if mismatches:
+            lines.append("  max-attempt mismatches:")
+            lines.extend(mismatches)
+        lines.append(
+            "  Likely cause: output dir was reused for a rerun, or a "
+            "critic_attempt file was partially regenerated. Delete the "
+            "run dir and regenerate, or point at a clean run."
+        )
+        raise ValueError("\n".join(lines))
+
+    return list(by_key.values())
 
 
 def _by_instance(rows: list[dict]) -> dict[str, list[dict]]:
