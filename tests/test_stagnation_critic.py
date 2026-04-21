@@ -457,6 +457,93 @@ def test_emission_failure_leaves_state_retryable(monkeypatch: pytest.MonkeyPatch
     assert critic.certificate is not None
 
 
+def test_cert_fire_emits_stdout_line_once_on_transition(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Closing the 'cert metadata not serialized' caveat.
+
+    ``OperonStagnationCritic.evaluate()`` writes a ``[CERT-FIRE] {json}``
+    line to stdout once per critic instance when the certificate
+    transitions from None → fired. Uses ``capsys`` (real-stdout
+    capture), not ``caplog`` — the emission uses
+    ``print(..., file=sys.stdout, flush=True)`` by design because the
+    benchmarks runner captures stdout into
+    ``logs/instance_<iid>.output.log``, whereas Python stdlib logging
+    defaults to stderr (roborev #848 High).
+
+    Payload carries theorem, source, cert_evidence_n,
+    epiplexic_integral, severity, detection_index. Instance ID is NOT
+    in the payload — the critic doesn't receive it; correlation to
+    instances happens via the log filename downstream.
+    """
+    import json
+
+    critic = _make_critic()
+    for _ in range(6):
+        critic.evaluate([_agent_msg("same response every turn")])
+
+    out = capsys.readouterr().out
+    cert_lines = [ln for ln in out.splitlines() if "[CERT-FIRE]" in ln]
+    assert len(cert_lines) == 1, (
+        f"expected exactly one cert-fire stdout line, got {len(cert_lines)}: {cert_lines}"
+    )
+    _, _, payload_json = cert_lines[0].partition("[CERT-FIRE] ")
+    payload = json.loads(payload_json)
+    assert payload["theorem"] == "behavioral_stability_windowed"
+    assert payload["source"] == "operon_openhands_gates.stagnation_critic"
+    assert payload["cert_evidence_n"] == critic.critical_duration
+    assert 0.0 <= payload["epiplexic_integral"] <= 1.0
+    assert 0.0 <= payload["severity"] <= 1.0
+    assert isinstance(payload["detection_index"], int)
+
+
+def test_cert_fire_does_not_emit_on_non_transition(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Diverse outputs never trip the stagnation transition — no stdout line."""
+    critic = _make_critic()
+    for text in _DIVERSE_RESPONSES:
+        critic.evaluate([_agent_msg(text)])
+    out = capsys.readouterr().out
+    assert "[CERT-FIRE]" not in out
+
+
+def test_cert_fire_does_not_re_emit_after_initial_fire(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sustained stagnation must not re-emit on every subsequent
+    evaluate() call. The emission guard keys on the
+    ``was_stagnant / should_be_stagnant`` transition, not the current
+    state — so once fired, no more lines.
+    """
+    critic = _make_critic()
+    # Drive well past the initial transition so any re-emission bug
+    # shows as multiple lines.
+    for _ in range(20):
+        critic.evaluate([_agent_msg("locked in answer")])
+
+    out = capsys.readouterr().out
+    cert_lines = [ln for ln in out.splitlines() if "[CERT-FIRE]" in ln]
+    assert len(cert_lines) == 1, (
+        f"expected exactly one cert-fire line across 20 evaluations, got {len(cert_lines)}"
+    )
+
+
+def test_cert_fire_goes_to_stdout_not_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Roborev #848 High: the benchmarks runner captures stdout into
+    ``logs/instance_<iid>.output.log``. A cert marker on stderr would
+    be invisible to the downstream parser. Pin the channel explicitly.
+    """
+    critic = _make_critic()
+    for _ in range(6):
+        critic.evaluate([_agent_msg("stuck stuck stuck")])
+    captured = capsys.readouterr()
+    assert "[CERT-FIRE]" in captured.out
+    assert "[CERT-FIRE]" not in captured.err
+
+
 def test_windowed_theorem_resolves_through_upstream_registry() -> None:
     """Same-process contract: windowed theorem resolves to a callable,
     distinct from the legacy theorem's callable. Uses the public

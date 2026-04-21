@@ -131,6 +131,22 @@ Per-instance `per_instance[*]` rows carry `baseline_max_attempt`, `treatment_max
 
 `--aborted-treatment-retry` is repeatable and marks instances whose treatment Attempt-2 started but didn't complete (e.g. timeout). Unknown IDs or IDs already having a completed retry row raise a validation error (they would otherwise double-count).
 
+### Certificate evidence (populates `certificates_emitted`, v0.1.0a3+)
+
+`OperonStagnationCritic.evaluate()` emits a `[CERT-FIRE] {json}` stdout log line on the cert-transition turn. The benchmarks runner captures the container's stdout into `logs/instance_<iid>.output.log` (JSON-wrapped under `[DOCKER]`). `generate_delta_artifact.py --baseline-logs-dir` / `--treatment-logs-dir` parse those logs and correlate to instances by filename:
+
+```bash
+.venv-experiment/bin/python scripts/generate_delta_artifact.py \
+  ... \
+  --baseline-logs-dir eval/runs/baseline/.../logs \
+  --treatment-logs-dir eval/runs/treatment/.../logs \
+  --out-json ... --out-md ...
+```
+
+When cert records are found: `summary.certificates_emitted` + `per_instance[*].treatment_certificate` carry the on-disk payload (theorem, source, `cert_evidence_n`, `epiplexic_integral`, `severity`, `detection_index`). Markdown gets a `Certificates emitted` headline row, a `Treat cert` column in the instance table, and the "cert metadata not serialized" caveat flips to a "side-channel log" variant that links back to the library emission.
+
+The logs-dir flags are independently optional and pre-instrumentation logs (v0.1.0a2 and earlier) parse to zero cert records — backward compatible.
+
 ### Eval step (populates `pass_at_1`)
 
 SWE-bench's inference pipeline produces patches; the patch-evaluation step runs them against the instance tests. `benchmarks/swebench/eval_infer.py` is the entry point:

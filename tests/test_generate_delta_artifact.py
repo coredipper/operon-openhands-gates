@@ -472,3 +472,200 @@ def test_markdown_per_instance_rate_stays_in_range_with_attempt_3() -> None:
     assert rate_row_lines, "markdown missing per-instance rejection rate row"
     assert "67%" in rate_row_lines[0]
     assert "100%" not in rate_row_lines[0]
+
+
+# ---- Cert-fire log ingestion (new side-channel log from v0.1.0a3) ---------
+
+
+def _write_docker_log_with_cert_fire(
+    path: Path, payload: dict, *, noise_before: bool = True
+) -> None:
+    """Write a synthetic instance_*.output.log that mirrors what the
+    benchmarks runner captures from the container's stdout.
+
+    Real lines look like:
+        [DOCKER] {"asctime": "...", "levelname": "INFO",
+                  "name": "operon_openhands_gates.stagnation_critic",
+                  "message": "[CERT-FIRE] {\"theorem\": ..., ...}"}
+    with optional unrelated lines before/after.
+    """
+    lines = []
+    if noise_before:
+        lines.append(
+            '[DOCKER] {"asctime": "2026-04-21 12:00:00,000", "levelname": "INFO", '
+            '"name": "uvicorn.access", "message": "GET /api/conversations/foo"}'
+        )
+    lines.append(
+        '[DOCKER] {"asctime": "2026-04-21 12:00:01,000", "levelname": "INFO", '
+        '"name": "operon_openhands_gates.stagnation_critic", '
+        '"message": "[CERT-FIRE] ' + json.dumps(payload).replace('"', '\\"') + '"}'
+    )
+    lines.append(
+        '[DOCKER] {"asctime": "2026-04-21 12:00:02,000", "levelname": "INFO", '
+        '"name": "uvicorn.access", "message": "GET /api/conversations/bar"}'
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_load_cert_fires_parses_docker_wrapped_lines(tmp_path: Path) -> None:
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    payload = {
+        "theorem": "behavioral_stability_windowed",
+        "source": "operon_openhands_gates.stagnation_critic",
+        "cert_evidence_n": 3,
+        "epiplexic_integral": 0.12,
+        "severity": 0.88,
+        "detection_index": 42,
+    }
+    _write_docker_log_with_cert_fire(logs_dir / "instance_django__django-11001.output.log", payload)
+    _write_docker_log_with_cert_fire(
+        logs_dir / "instance_astropy__astropy-12907.output.log", payload
+    )
+    result = gen._load_cert_fires_from_logs(logs_dir)
+    assert set(result.keys()) == {"django__django-11001", "astropy__astropy-12907"}
+    assert result["django__django-11001"]["theorem"] == "behavioral_stability_windowed"
+    assert result["django__django-11001"]["cert_evidence_n"] == 3
+
+
+def test_load_cert_fires_returns_empty_when_logs_dir_missing(tmp_path: Path) -> None:
+    """Missing logs dir is not an error — treated same as no cert fires.
+    Lets pre-instrumentation runs flow through the back-compat path.
+    """
+    result = gen._load_cert_fires_from_logs(tmp_path / "nonexistent")
+    assert result == {}
+
+
+def test_load_cert_fires_returns_empty_when_no_cert_lines(tmp_path: Path) -> None:
+    """Logs dir exists but no [CERT-FIRE] lines — instance not keyed."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "instance_a.output.log").write_text(
+        '[DOCKER] {"asctime": "x", "message": "nothing to see here"}\n',
+        encoding="utf-8",
+    )
+    result = gen._load_cert_fires_from_logs(logs_dir)
+    assert result == {}
+
+
+def test_load_cert_fires_keeps_first_only(tmp_path: Path) -> None:
+    """Defensive: two [CERT-FIRE] lines in a single file (shouldn't
+    happen in practice — critic only fires on transition) — keep the
+    first so downstream correlation is deterministic.
+    """
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    log = logs_dir / "instance_a.output.log"
+    first = {"theorem": "t1", "source": "s", "cert_evidence_n": 1}
+    second = {"theorem": "t2", "source": "s", "cert_evidence_n": 2}
+    log.write_text(
+        '[DOCKER] {"asctime": "x", "levelname": "INFO", "name": "n", '
+        '"message": "[CERT-FIRE] ' + json.dumps(first).replace('"', '\\"') + '"}\n'
+        '[DOCKER] {"asctime": "y", "levelname": "INFO", "name": "n", '
+        '"message": "[CERT-FIRE] ' + json.dumps(second).replace('"', '\\"') + '"}\n',
+        encoding="utf-8",
+    )
+    result = gen._load_cert_fires_from_logs(logs_dir)
+    assert result["a"]["theorem"] == "t1"
+
+
+def test_build_artifact_populates_cert_fields_when_logs_supplied() -> None:
+    baseline = [_row("a", attempt=1), _row("b", attempt=1)]
+    treatment = [_row("a", attempt=1), _row("b", attempt=1)]
+    # treatment has cert for "a", not "b"; baseline has no certs
+    treatment_cert_fires = {"a": {"theorem": "behavioral_stability_windowed", "cert_evidence_n": 3}}
+    artifact = gen.build_artifact(
+        baseline,
+        treatment,
+        set(),
+        model="openai/gpt-5",
+        baseline_cert_fires={},
+        treatment_cert_fires=treatment_cert_fires,
+    )
+    # Summary rollup present on both sides since both cert_fires were
+    # passed (empty on baseline, one entry on treatment)
+    assert artifact["summary"]["baseline"]["certificates_emitted"] == 0
+    assert artifact["summary"]["operon_stagnation"]["certificates_emitted"] == 1
+    # Per-instance rows carry the cert payload (or None)
+    by_iid = {p["instance_id"]: p for p in artifact["per_instance"]}
+    assert by_iid["a"]["treatment_certificate"]["theorem"] == "behavioral_stability_windowed"
+    assert by_iid["b"]["treatment_certificate"] is None
+    assert by_iid["a"]["baseline_certificate"] is None
+
+
+def test_markdown_includes_cert_row_and_mutates_caveat_when_evidence_present() -> None:
+    baseline = [_row("a", attempt=1), _row("b", attempt=1)]
+    treatment = [_row("a", attempt=1), _row("b", attempt=1)]
+    treatment_cert_fires = {"a": {"theorem": "behavioral_stability_windowed"}}
+    artifact = gen.build_artifact(
+        baseline,
+        treatment,
+        set(),
+        model="openai/gpt-5",
+        baseline_cert_fires={},
+        treatment_cert_fires=treatment_cert_fires,
+    )
+    md = gen.generate_markdown(artifact)
+    # Headline row for certificates
+    assert "Certificates emitted" in md
+    # Treatment-side cert column with one ✓ for "a" and · for "b"
+    assert "Treat cert" in md
+    assert "✓" in md
+    # Caveat flipped to the on-disk evidence phrasing
+    assert "Certificate evidence via side-channel log" in md
+    assert "Certificate metadata not serialized" not in md
+
+
+def test_validate_logs_dir_rejects_missing_directory(tmp_path: Path) -> None:
+    """Roborev #848 Medium: a mistyped --*-logs-dir path must fail
+    fast, not silently produce ``certificates_emitted: 0``.
+    """
+    rows = [_row("a", attempt=1)]
+    missing = tmp_path / "nonexistent"
+    with pytest.raises(ValueError, match="logs dir does not exist"):
+        gen._validate_logs_dir_covers_rows(missing, rows, "baseline")
+
+
+def test_validate_logs_dir_rejects_empty_dir(tmp_path: Path) -> None:
+    """An existing but empty logs dir is the clearest case of a wrong
+    path (e.g. user pointed at the parent). Fail with a hint.
+    """
+    empty = tmp_path / "logs"
+    empty.mkdir()
+    rows = [_row("a", attempt=1)]
+    with pytest.raises(ValueError, match="no ``instance_"):
+        gen._validate_logs_dir_covers_rows(empty, rows, "baseline")
+
+
+def test_validate_logs_dir_rejects_missing_instance_file(tmp_path: Path) -> None:
+    """A logs dir from a different slice (wrong instance coverage)
+    must fail with the list of missing IDs.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "instance_a.output.log").write_text("")  # has "a" only
+    rows = [_row("a", attempt=1), _row("b", attempt=1)]  # needs both
+    with pytest.raises(ValueError, match="missing 1 ``instance_"):
+        gen._validate_logs_dir_covers_rows(logs, rows, "treatment")
+
+
+def test_validate_logs_dir_accepts_matching_files(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "instance_a.output.log").write_text("")
+    (logs / "instance_b.output.log").write_text("")
+    # Extra files beyond the row set are fine — only MISSING is an error.
+    (logs / "instance_c.output.log").write_text("")
+    rows = [_row("a", attempt=1), _row("b", attempt=1)]
+    # No exception.
+    gen._validate_logs_dir_covers_rows(logs, rows, "baseline")
+
+
+def test_markdown_keeps_old_caveat_when_no_cert_evidence() -> None:
+    baseline = [_row("a", attempt=1)]
+    treatment = [_row("a", attempt=1)]
+    artifact = gen.build_artifact(baseline, treatment, set(), model="openai/gpt-5")
+    md = gen.generate_markdown(artifact)
+    assert "Certificates emitted" not in md
+    assert "Certificate metadata not serialized" in md
+    assert "Treat cert" not in md

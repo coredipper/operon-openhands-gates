@@ -101,6 +101,82 @@ def _final_row(rows: list[dict]) -> dict:
     return max(rows, key=lambda r: r.get("attempt", 1))
 
 
+# Line prefix emitted by ``OperonStagnationCritic.evaluate()`` when a
+# certificate transitions from None → fired. See the library change in
+# ``src/operon_openhands_gates/stagnation_critic.py``. The benchmarks
+# runner captures the container's stdout into
+# ``logs/instance_<iid>.output.log`` with the openhands JSON-log wrapper
+# (``[DOCKER] {"asctime": ..., "message": "...the line above..."}``);
+# this parser extracts the inner ``[CERT-FIRE] {json}`` payload.
+_CERT_FIRE_PREFIX = "[CERT-FIRE] "
+_DOCKER_LOG_PREFIX = "[DOCKER] "
+_INSTANCE_LOG_STEM_PREFIX = "instance_"
+_INSTANCE_LOG_SUFFIX = ".output.log"
+
+
+def _load_cert_fires_from_logs(logs_dir: Path) -> dict[str, dict]:
+    """Parse ``[CERT-FIRE]`` log lines from per-instance container logs.
+
+    Walks ``logs_dir`` for ``instance_<iid>.output.log`` files, scans
+    each for lines containing the ``[CERT-FIRE]`` prefix (either bare
+    or wrapped in the openhands JSON log envelope
+    ``[DOCKER] {"asctime": ..., "message": "...[CERT-FIRE] {...}..."}``),
+    and returns a dict keyed by instance_id (extracted from the filename).
+
+    Keeps the **first** cert-fire payload per instance. The critic's
+    emission guard fires once per critic instance per conversation, so
+    duplicates shouldn't occur; if they do (e.g. a retried Attempt-2
+    also fires), we favor the Attempt-1 record since that's the one
+    correlated with the baseline comparison.
+
+    Missing ``logs_dir`` is not an error — returns an empty dict so
+    callers can treat "no logs" identically to "logs but no cert
+    fires," which is the pre-instrumentation regime.
+    """
+    if not logs_dir.is_dir():
+        return {}
+
+    cert_fires: dict[str, dict] = {}
+    for log_path in sorted(logs_dir.glob(f"{_INSTANCE_LOG_STEM_PREFIX}*{_INSTANCE_LOG_SUFFIX}")):
+        stem = log_path.name
+        if not stem.startswith(_INSTANCE_LOG_STEM_PREFIX) or not stem.endswith(
+            _INSTANCE_LOG_SUFFIX
+        ):
+            continue
+        instance_id = stem[len(_INSTANCE_LOG_STEM_PREFIX) : -len(_INSTANCE_LOG_SUFFIX)]
+
+        for raw_line in log_path.open(encoding="utf-8", errors="replace"):
+            # Two shapes to handle:
+            #   1. Bare line: "...[CERT-FIRE] {...json...}..."
+            #   2. Docker-wrapped: "[DOCKER] {\"message\": \"...[CERT-FIRE] {...}...\"}"
+            # For the wrapped case we parse the outer JSON first and
+            # then search the ``message`` field. For the bare case we
+            # search the raw line. Either way, once we find the
+            # ``[CERT-FIRE] `` anchor we parse the trailing JSON.
+            search_text = raw_line
+            if raw_line.lstrip().startswith(_DOCKER_LOG_PREFIX):
+                stripped = raw_line.lstrip()[len(_DOCKER_LOG_PREFIX) :]
+                try:
+                    outer = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                search_text = outer.get("message", "")
+                if not isinstance(search_text, str):
+                    continue
+            anchor = search_text.find(_CERT_FIRE_PREFIX)
+            if anchor < 0:
+                continue
+            payload_text = search_text[anchor + len(_CERT_FIRE_PREFIX) :].strip()
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if instance_id not in cert_fires:
+                cert_fires[instance_id] = payload
+            # Continue scanning other lines, but this instance is locked.
+    return cert_fires
+
+
 def _load_eval_report(path: Path) -> dict:
     """Load a SWE-bench harness ``.report.json`` and normalize the id fields.
 
@@ -126,6 +202,57 @@ def _load_eval_report(path: Path) -> dict:
         if key in data:
             data[key] = frozenset(data[key])
     return data
+
+
+def _validate_logs_dir_covers_rows(
+    logs_dir: Path,
+    rows: list[dict],
+    condition_label: str,
+) -> None:
+    """Require the logs dir to contain ``instance_<iid>.output.log`` for
+    every row's ``instance_id``.
+
+    Roborev #848 Medium. A mistyped ``--baseline-logs-dir`` /
+    ``--treatment-logs-dir`` path or a stale log directory would
+    silently return an empty cert dict, making the artifact report
+    ``certificates_emitted: 0`` without any error — symmetric to how
+    eval reports are validated. Fail fast with a list of missing
+    ``instance_<iid>.output.log`` filenames so the user can fix the
+    flag rather than the artifact.
+
+    An empty logs dir (no ``instance_*.output.log`` at all) is also
+    an error — it's the clearest case of a wrong path.
+    """
+    if not logs_dir.is_dir():
+        raise ValueError(
+            f"{condition_label} logs dir does not exist: {logs_dir!s}\n"
+            "  Expected a directory containing ``instance_<iid>.output.log`` "
+            "files (created by the benchmarks runner under "
+            "``eval/runs/<cond>/.../logs/``)."
+        )
+    row_ids = {r["instance_id"] for r in rows}
+    present_ids = {
+        p.name[len(_INSTANCE_LOG_STEM_PREFIX) : -len(_INSTANCE_LOG_SUFFIX)]
+        for p in logs_dir.glob(f"{_INSTANCE_LOG_STEM_PREFIX}*{_INSTANCE_LOG_SUFFIX}")
+    }
+    if not present_ids:
+        raise ValueError(
+            f"{condition_label} logs dir {logs_dir!s} has no "
+            f"``instance_*.output.log`` files. "
+            "Point at the directory the benchmarks runner wrote to, "
+            "not its parent."
+        )
+    missing = sorted(row_ids - present_ids)
+    if missing:
+        raise ValueError(
+            f"{condition_label} logs dir is missing {len(missing)} "
+            f"``instance_<iid>.output.log`` file(s) for the "
+            f"{condition_label} run rows: "
+            + ", ".join(missing)
+            + f"\n  Logs dir scanned: {logs_dir!s}. "
+            "The logs dir is probably from a different slice — point at "
+            "the one that matches this run's ``output.jsonl``."
+        )
 
 
 def _validate_eval_report_covers_rows(
@@ -195,6 +322,7 @@ def _aggregate(
     rows: list[dict],
     aborted_retries: set[str],
     eval_report: dict | None = None,
+    cert_fires: dict[str, dict] | None = None,
 ) -> dict:
     by_iid = _by_instance(rows)
     finals = [_final_row(rs) for rs in by_iid.values()]
@@ -301,6 +429,15 @@ def _aggregate(
         else:
             summary["pass_at_1"] = round(n_resolved / len(by_iid), 4)
 
+    # Cert-fire rollup (optional — populated only when a logs dir with
+    # ``[CERT-FIRE]`` lines was supplied). Each in-scope instance
+    # either has a cert record or doesn't; the count and rate are
+    # direct on-disk evidence rather than the retry-count proxy.
+    if cert_fires is not None:
+        n_with_cert = sum(1 for iid in by_iid if iid in cert_fires)
+        summary["certificates_emitted"] = n_with_cert
+        summary["certificates_emitted_rate"] = round(n_with_cert / len(by_iid), 3)
+
     return summary
 
 
@@ -347,6 +484,8 @@ def build_artifact(
     model: str,
     baseline_eval_report: dict | None = None,
     treatment_eval_report: dict | None = None,
+    baseline_cert_fires: dict[str, dict] | None = None,
+    treatment_cert_fires: dict[str, dict] | None = None,
 ) -> dict:
     base_ids = set(r["instance_id"] for r in baseline_rows)
     treat_ids = set(r["instance_id"] for r in treatment_rows)
@@ -393,9 +532,12 @@ def build_artifact(
             "instance_ids": sorted(base_ids),
         },
         "summary": {
-            "baseline": _aggregate(baseline_rows, set(), baseline_eval_report),
+            "baseline": _aggregate(baseline_rows, set(), baseline_eval_report, baseline_cert_fires),
             "operon_stagnation": _aggregate(
-                treatment_rows, aborted_treatment_retries, treatment_eval_report
+                treatment_rows,
+                aborted_treatment_retries,
+                treatment_eval_report,
+                treatment_cert_fires,
             ),
         },
         "per_instance": [
@@ -420,6 +562,13 @@ def build_artifact(
                 # ``None`` signals "not scored" (vs False = unresolved).
                 "baseline_eval_status": _eval_status_for(iid, baseline_eval_report),
                 "treatment_eval_status": _eval_status_for(iid, treatment_eval_report),
+                # Certificate records — populated when a logs dir carrying
+                # ``[CERT-FIRE]`` lines was supplied. ``None`` means the
+                # logs-dir wasn't passed or the instance had no cert fire.
+                # Baseline runs don't use OperonStagnationCritic so these
+                # will always be None for baseline; schema stays symmetric.
+                "baseline_certificate": (baseline_cert_fires or {}).get(iid),
+                "treatment_certificate": (treatment_cert_fires or {}).get(iid),
             }
             for iid in sorted(base_ids)
         ],
@@ -467,6 +616,14 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
     # missing, it falls back to the infer-only layout rather than
     # rendering an asymmetric half-eval view (roborev #844 Medium 2).
     has_eval = "resolved_count" in bs and "resolved_count" in ts
+    # Whether on-disk cert records were supplied. Keyed on the
+    # treatment summary alone because baseline uses finish_with_patch
+    # and will always have 0 cert fires — a "treatment had cert log
+    # ingestion but baseline didn't" state is meaningful. Specifically:
+    # the summary field is only added by ``_aggregate`` when
+    # ``cert_fires`` is non-None (empty dict is fine; it just gives 0),
+    # so treating "key present at all" as the signal works.
+    has_cert_evidence = "certificates_emitted" in ts
 
     def _status_emoji(status: str | None) -> str:
         if status is None:
@@ -500,12 +657,35 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
                 f"| {_status_emoji(p.get('baseline_eval_status'))} "
                 f"| {_status_emoji(p.get('treatment_eval_status'))} "
             )
+        if has_cert_evidence:
+            treat_cert = p.get("treatment_certificate")
+            cert_marker = "✓" if treat_cert else "·"
+            line += f"| {cert_marker} "
         line += "|"
         rows.append(line)
 
+    if has_cert_evidence:
+        cert_caveat_text = (
+            f"**Certificate evidence via side-channel log.** "
+            f"``OperonStagnationCritic`` emits a ``[CERT-FIRE]`` line on its "
+            f"stdout when a certificate fires (v0.1.0a3+). The benchmarks "
+            f"runner captures those lines into "
+            f"``logs/instance_<iid>.output.log``; "
+            f"``scripts/generate_delta_artifact.py --*-logs-dir`` parses "
+            f"them to populate ``treatment_certificate`` per instance + "
+            f"``certificates_emitted`` summary. **{ts['certificates_emitted']} "
+            f"of {ts['n_instances']} treatment instances have on-disk cert "
+            f"records** on this run. "
+            f"The openhands-sdk still doesn't serialize ``CriticResult.metadata`` "
+            f"into ``MessageEvent`` / ``ActionEvent`` history; the stdout log "
+            f"is the deliberate workaround."
+        )
+    else:
+        cert_caveat_text = '**Certificate metadata not serialized.** `OperonStagnationCritic` emits `CriticResult.metadata` with `certificate_theorem="behavioral_stability_windowed"` on stagnation fires. That metadata field is **not captured** in the serialized event history (`critic_result` field on `MessageEvent` / `ActionEvent` is `null` throughout). Known openhands-sdk serialization gap, not a critic bug. Critic firing is inferred from Attempt-2 presence (for completed retries) or from the pinned aborted-retry list (for timed-out ones), not from on-disk certificate records. Fixing this requires either patching the SDK or adding a side-channel log from inside `OperonStagnationCritic.evaluate()`.'
+
     caveats = [
         f"**Sample bias.** n={bs['n_instances']}, {repo_phrase}. Original plan called for n=30 alphabetic slice. The Docker-Desktop-on-Mac apt-signature build bug blocked all matplotlib/sympy/flask/pytest instances, leaving a {dominant_repo}-heavy subset. Not representative of full SWE-bench-lite; generalizability limited. Run on a Linux host or OpenHands remote runtime for an unbiased slice.",
-        '**Certificate metadata not serialized.** `OperonStagnationCritic` emits `CriticResult.metadata` with `certificate_theorem="behavioral_stability_windowed"` on stagnation fires. That metadata field is **not captured** in the serialized event history (`critic_result` field on `MessageEvent` / `ActionEvent` is `null` throughout). Known openhands-sdk serialization gap, not a critic bug. Critic firing is inferred from Attempt-2 presence (for completed retries) or from the pinned aborted-retry list (for timed-out ones), not from on-disk certificate records. Fixing this requires either patching the SDK or adding a side-channel log from inside `OperonStagnationCritic.evaluate()`.',
+        cert_caveat_text,
     ]
     # Only keep the "`resolved` not computed" caveat when the eval
     # step hasn't been run. When it has, the artifact carries real
@@ -596,18 +776,33 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
         pass_at_1_row = ""
         retry_flip_line = ""
 
-    # Instance-level table header — adds a "Resolved?" column pair
-    # when the eval step was run.
-    if has_eval:
-        instance_table_header = (
-            "| Instance | Base attempts | Treat attempts | Base cost | Treat cost | Base resolved | Treat resolved |\n"
-            "|----------|--------------:|---------------:|----------:|-----------:|:-------------:|:--------------:|"
+    # Optional cert-emission headline row. ``_aggregate`` already
+    # computed the count when ``cert_fires`` was non-None; here we
+    # just format. Baseline will always be 0 on finish_with_patch
+    # runs since that critic doesn't emit certificates.
+    if has_cert_evidence:
+        cert_row = (
+            f"\n| Certificates emitted            | {bs.get('certificates_emitted', 0):>8} | "
+            f"{ts['certificates_emitted']:>17} | "
+            f"**+{ts['certificates_emitted'] - bs.get('certificates_emitted', 0)}** |"
         )
     else:
-        instance_table_header = (
-            "| Instance | Baseline attempts | Treatment attempts | Baseline cost | Treatment cost |\n"
-            "|----------|------------------:|-------------------:|--------------:|---------------:|"
-        )
+        cert_row = ""
+
+    # Instance-level table header — adds a "Resolved?" column pair
+    # when the eval step was run, and a treatment-side "Cert" column
+    # when on-disk cert evidence is available.
+    header_cols = ["Instance", "Base attempts", "Treat attempts", "Base cost", "Treat cost"]
+    align_cols = ["", "--------------:", "---------------:", "----------:", "-----------:"]
+    if has_eval:
+        header_cols += ["Base resolved", "Treat resolved"]
+        align_cols += [":-------------:", ":--------------:"]
+    if has_cert_evidence:
+        header_cols.append("Treat cert")
+        align_cols.append(":----------:")
+    instance_table_header = (
+        "| " + " | ".join(header_cols) + " |\n|----------|" + "|".join(align_cols[1:]) + "|"
+    )
 
     # "Does/Does not prove" + "Next steps" — gate claims on ``has_eval``
     # (roborev #846 Medium). Unconditional "from inference through
@@ -625,33 +820,56 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
     # Which caveat number covers certificates depends on whether the
     # "`resolved` not computed" caveat is present.
     cert_caveat_num = 2 if has_eval else 3
+    # When on-disk cert evidence is present, "does not provide cert
+    # evidence" is a false claim — flip to "does".
+    if has_cert_evidence:
+        cert_evidence_does = (
+            f"- Surface {ts['certificates_emitted']} on-disk certificate record(s) "
+            f"via the ``[CERT-FIRE]`` stdout log parsed from "
+            f"``logs/instance_<iid>.output.log`` (see caveat {cert_caveat_num})."
+        )
+        cert_evidence_doesnot = ""
+    else:
+        cert_evidence_does = ""
+        cert_evidence_doesnot = (
+            f"\n- Provide on-disk certificate evidence "
+            f"(openhands-sdk serialization gap; see caveat {cert_caveat_num})."
+        )
     if has_eval:
         does_does_not_section = (
             "**Does:**\n"
             "- The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances, from inference through patch-evaluation.\n"
             f"- {critic_rate_prose}\n"
-            f"- {overhead_prose}\n"
-            "\n"
+            f"- {overhead_prose}"
+            + (f"\n{cert_evidence_does}" if cert_evidence_does else "")
+            + "\n\n"
             "**Does not:**\n"
-            "- Generalize beyond the selection-biased instance subset (see caveat 1).\n"
-            f"- Provide on-disk certificate evidence (openhands-sdk serialization gap; see caveat {cert_caveat_num})."
+            "- Generalize beyond the selection-biased instance subset (see caveat 1)."
+            + cert_evidence_doesnot
         )
-        next_steps_section = (
-            "1. **Fix the certificate-metadata serialization** so downstream consumers can populate `certificate_emitted`, `certificate_theorem`, `cert_evidence_n` without relying on the retry-count proxy.\n"
-            "2. **Rerun on a Linux host or `--workspace remote`** to get an unbiased 30-instance slice.\n"
-            "3. **Broader scope:** once the harness is stable, repeat on Claude Sonnet 4.6 (original plan default) and on SWE-bench-Verified."
-        )
+        if has_cert_evidence:
+            next_steps_section = (
+                "1. **Rerun on a Linux host or `--workspace remote`** to get an unbiased 30-instance slice.\n"
+                "2. **Broader scope:** once the harness is stable, repeat on Claude Sonnet 4.6 (original plan default) and on SWE-bench-Verified."
+            )
+        else:
+            next_steps_section = (
+                "1. **Fix the certificate-metadata serialization** so downstream consumers can populate `certificate_emitted`, `certificate_theorem`, `cert_evidence_n` without relying on the retry-count proxy.\n"
+                "2. **Rerun on a Linux host or `--workspace remote`** to get an unbiased 30-instance slice.\n"
+                "3. **Broader scope:** once the harness is stable, repeat on Claude Sonnet 4.6 (original plan default) and on SWE-bench-Verified."
+            )
     else:
         does_does_not_section = (
             "**Does:**\n"
             "- The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances (inference only; the SWE-bench patch-evaluation step was not run on this artifact).\n"
             f"- {critic_rate_prose}\n"
-            f"- {overhead_prose}\n"
-            "\n"
+            f"- {overhead_prose}"
+            + (f"\n{cert_evidence_does}" if cert_evidence_does else "")
+            + "\n\n"
             "**Does not:**\n"
             "- Establish whether retries improve patch correctness — that needs the SWE-bench evaluation step (see caveat 2).\n"
-            "- Generalize beyond the selection-biased instance subset (see caveat 1).\n"
-            f"- Provide on-disk certificate evidence (openhands-sdk serialization gap; see caveat {cert_caveat_num})."
+            "- Generalize beyond the selection-biased instance subset (see caveat 1)."
+            + cert_evidence_doesnot
         )
         next_steps_section = (
             "1. **Run SWE-bench evaluation** on both `output.jsonl` files (dedupe treatment first via `scripts/dedupe_for_eval.py`), then pass the resulting `.report.json` files to this script via `--baseline-eval-report` / `--treatment-eval-report` to populate `pass_at_1`.\n"
@@ -679,7 +897,7 @@ def generate_markdown(artifact: dict, extra_caveats: list[str] | None = None) ->
 | Total retry rounds              | {bs["total_retry_rounds"]:>8} | {ts["total_retry_rounds"]:>17} | **+{ts["total_retry_rounds"] - bs["total_retry_rounds"]}** |
 | Cumulative cost (USD)           | ${bs["cumulative_cost_usd"]["total"]:>6.2f} | ${ts["cumulative_cost_usd"]["total"]:>16.2f} | **+{delta_pct}%** (+${delta_total_dollars:.2f}) |
 | Mean final patch length (chars) | {bs["final_patch_len"]["mean"]:>8.0f} | {ts["final_patch_len"]["mean"]:>17.0f} | — |
-| Mean final history events       | {bs["final_n_events"]["mean"]:>8.1f} | {ts["final_n_events"]["mean"]:>17.1f} | — |{pass_at_1_row}
+| Mean final history events       | {bs["final_n_events"]["mean"]:>8.1f} | {ts["final_n_events"]["mean"]:>17.1f} | — |{pass_at_1_row}{cert_row}
 
 Per-round budget overhead: {per_round_str}.{retry_flip_line}
 
@@ -761,6 +979,31 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--baseline-logs-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to the baseline run's ``logs/`` directory "
+            "(contains ``instance_<iid>.output.log`` files). If provided, "
+            "the script parses ``[CERT-FIRE]`` lines emitted by "
+            "``OperonStagnationCritic.evaluate()`` to populate "
+            "``baseline_certificate`` per-instance and the "
+            "``certificates_emitted`` summary rollup. Baseline runs use "
+            "``finish_with_patch`` and will normally yield zero cert "
+            "fires — the flag is symmetric for schema consistency."
+        ),
+    )
+    parser.add_argument(
+        "--treatment-logs-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to the treatment run's ``logs/`` directory. "
+            "See ``--baseline-logs-dir``. Provides the on-disk cert "
+            "evidence that replaces the retry-count proxy."
+        ),
+    )
+    parser.add_argument(
         "--out-json", type=Path, required=True, help="Output path for the JSON artifact."
     )
     parser.add_argument(
@@ -790,6 +1033,26 @@ def main() -> None:
         _load_eval_report(args.treatment_eval_report) if args.treatment_eval_report else None
     )
 
+    # Cert-fire logs are independently optional (no pair requirement —
+    # it's perfectly fine to have one side's logs and not the other's,
+    # and the markdown handles each condition's summary separately).
+    #
+    # Roborev #848 Medium: when a logs dir IS supplied, validate it
+    # against the run rows. A stale or mistyped directory would
+    # silently degrade to ``certificates_emitted: 0`` without any
+    # error — same bug class that eval-report validation catches.
+    if args.baseline_logs_dir is not None:
+        _validate_logs_dir_covers_rows(args.baseline_logs_dir, baseline_rows, "baseline")
+    if args.treatment_logs_dir is not None:
+        _validate_logs_dir_covers_rows(args.treatment_logs_dir, treatment_rows, "treatment")
+
+    baseline_cert_fires = (
+        _load_cert_fires_from_logs(args.baseline_logs_dir) if args.baseline_logs_dir else None
+    )
+    treatment_cert_fires = (
+        _load_cert_fires_from_logs(args.treatment_logs_dir) if args.treatment_logs_dir else None
+    )
+
     artifact = build_artifact(
         baseline_rows,
         treatment_rows,
@@ -797,6 +1060,8 @@ def main() -> None:
         model=args.model,
         baseline_eval_report=baseline_eval_report,
         treatment_eval_report=treatment_eval_report,
+        baseline_cert_fires=baseline_cert_fires,
+        treatment_cert_fires=treatment_cert_fires,
     )
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
     args.out_json.write_text(json.dumps(artifact, indent=2) + "\n")
