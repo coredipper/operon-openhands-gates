@@ -11,29 +11,29 @@
 |---------------------------------|---------:|------------------:|-----------:|
 | Instances                       |       10 |                10 | —          |
 | Instances with ≥1 rejection     |        0 |                 6 | **+6** |
-| &nbsp;&nbsp;&nbsp;with completed retry | — |                 5 | — |
-| &nbsp;&nbsp;&nbsp;with aborted retry (timeout) | — |                 1 | — |
+| &nbsp;&nbsp;&nbsp;with completed retry | — |                 6 | — |
+| &nbsp;&nbsp;&nbsp;with aborted retry (timeout) | — |                 0 | — |
 | Per-instance rejection rate     |       0% |               60% | **+60 pp** |
-| Total retry rounds              |        0 |                 6 | **+6** |
-| Cumulative cost (USD)           | $  4.21 | $            6.58 | **+56%** (+$2.37) |
-| Mean final patch length (chars) |     1839 |              1712 | — |
-| Mean final history events       |     80.3 |              80.6 | — |
-| **pass@1**                      |      60% |               60% | **+0 pp** |
-| &nbsp;&nbsp;&nbsp;resolved       |        6 |                 6 | — |
-| &nbsp;&nbsp;&nbsp;unresolved     |        4 |                 4 | — |
+| Total retry rounds              |        0 |                12 | **+12** |
+| Cumulative cost (USD)           | $  4.21 | $            9.94 | **+136%** (+$5.73) |
+| Mean final patch length (chars) |     1839 |              1466 | — |
+| Mean final history events       |     80.3 |              75.2 | — |
+| **pass@1**                      |      60% |               70% | **+10 pp** |
+| &nbsp;&nbsp;&nbsp;resolved       |        6 |                 7 | — |
+| &nbsp;&nbsp;&nbsp;unresolved     |        4 |                 3 | — |
 | Certificates emitted            |        0 |                 0 | **+0** |
 
-Per-round budget overhead: **$0.47** per completed retry round (= total cost delta / total_completed_retry_rounds; aborted retries excluded to avoid bias from undercounted spend).
+Per-round budget overhead: **$0.48** per completed retry round (= total cost delta / total_completed_retry_rounds; aborted retries excluded to avoid bias from undercounted spend).
 
-Retry-flip accounting (treatment retried 6 instance(s)): **0** improved (unresolved → resolved), **0** broke (resolved → unresolved), 6 unchanged.
+Retry-flip accounting (treatment retried 6 instance(s)): **1** improved (unresolved → resolved), **0** broke (resolved → unresolved), 5 unchanged.
 
 **Raw artifact:** [`swebench_lite_delta.json`](./swebench_lite_delta.json). Reproduce via `scripts/generate_delta_artifact.py`.
 
 ## What the critic did
 
-On the 10-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected the first-attempt patch on 6 of 10 instances (60%), producing 6 total retry round(s): 5 completed, 1 aborted on timeout.
+On the 10-instance shared slice, the default `finish_with_patch` critic accepted every first-attempt patch. `OperonStagnationCritic` rejected the first-attempt patch on 6 of 10 instances (60%), producing 12 total retry round(s): 12 completed, 0 aborted on timeout.
 
-That's a **measurable behavioral delta** — the structural critic reaches different "done" decisions than an LLM-judged critic on the same agent trajectories. The cost is a **+56% budget overhead** for the slice.
+That's a **measurable behavioral delta** — the structural critic reaches different "done" decisions than an LLM-judged critic on the same agent trajectories. The cost is a **+136% budget overhead** for the slice.
 
 ## Instance-level table
 
@@ -41,16 +41,16 @@ All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delt
 
 | Instance | Base attempts | Treat attempts | Base cost | Treat cost | Base resolved | Treat resolved | Treat cert |
 |----------|--------------:|---------------:|----------:|-----------:|:-------------:|:--------------:|:----------:|
-| `astropy__astropy-12907` | 1 | 1 | $0.29 | $0.25 | ✅ | ✅ | · |
-| `django__django-11001` | 1 | **2** | $0.40 | **$1.03** | ✅ | ✅ | · |
-| `django__django-11019` | 1 | **1 → aborted 2** | $0.68 | **$0.66** | ❌ | ❌ | · |
-| `django__django-11099` | 1 | **2** | $0.24 | **$0.65** | ✅ | ✅ | · |
-| `django__django-11283` | 1 | **2** | $0.40 | **$0.66** | ❌ | ❌ | · |
-| `django__django-11564` | 1 | 1 | $0.81 | $0.63 | ❌ | ❌ | · |
-| `django__django-11815` | 1 | **2** | $0.43 | **$0.94** | ❌ | ❌ | · |
-| `django__django-11848` | 1 | 1 | $0.33 | $0.37 | ✅ | ✅ | · |
-| `django__django-11964` | 1 | 1 | $0.39 | $0.39 | ✅ | ✅ | · |
-| `django__django-11999` | 1 | **2** | $0.24 | **$1.00** | ✅ | ✅ | · |
+| `astropy__astropy-12907` | 1 | 1 | $0.29 | $0.20 | ✅ | ✅ | · |
+| `django__django-11001` | 1 | 1 | $0.40 | $0.52 | ✅ | ✅ | · |
+| `django__django-11019` | 1 | **3** | $0.68 | **$3.05** | ❌ | ❌ | · |
+| `django__django-11099` | 1 | **3** | $0.24 | **$0.66** | ✅ | ✅ | · |
+| `django__django-11283` | 1 | **3** | $0.40 | **$1.29** | ❌ | ❌ | · |
+| `django__django-11564` | 1 | 1 | $0.81 | $0.66 | ❌ | ❌ | · |
+| `django__django-11815` | 1 | **3** | $0.43 | **$1.12** | ❌ | ✅ | · |
+| `django__django-11848` | 1 | **3** | $0.33 | **$1.15** | ✅ | ✅ | · |
+| `django__django-11964` | 1 | 1 | $0.39 | $0.23 | ✅ | ✅ | · |
+| `django__django-11999` | 1 | **3** | $0.24 | **$1.06** | ✅ | ✅ | · |
 
 `1 → aborted 2` = critic rejected Attempt-1, Attempt-2 started but timed out before completion (per-instance `treatment_retry_aborted: true` in the JSON).
 
@@ -60,16 +60,14 @@ All numbers read directly from [`swebench_lite_delta.json`](./swebench_lite_delt
 
 2. **Certificate evidence via side-channel log.** ``OperonStagnationCritic`` emits a ``[CERT-FIRE]`` line on its stdout when a certificate fires (v0.1.0a3+). The benchmarks runner captures those lines into ``logs/instance_<iid>.output.log``; ``scripts/generate_delta_artifact.py --*-logs-dir`` parses them to populate ``treatment_certificate`` per instance + ``certificates_emitted`` summary. **0 of 10 treatment instances have on-disk cert records** on this run. The openhands-sdk still doesn't serialize ``CriticResult.metadata`` into ``MessageEvent`` / ``ActionEvent`` history; the stdout log is the deliberate workaround.
 
-3. **Aborted retries (1).** Critic rejected Attempt-1 for `django__django-11019`, triggered Attempt-2 that hit the 60-min per-attempt ceiling and was killed. Counted as critic rejection(s) in the headline rate (`aborted_retries: 1`), but no Attempt-2 row exists in `output.jsonl` — their cumulative cost figures undercount what a clean retry would have produced. The per-retry cost figure excludes them from the denominator for this reason.
-
-4. **Single model.** Paper 4's `threshold=0.2` epiplexic-integral cutoff was validated on different model families (sentence-MiniLM embeddings at n=300 trials). Behavior on the experiment model's trajectories may have different stagnation dynamics than the validation set.
+3. **Single model.** Paper 4's `threshold=0.2` epiplexic-integral cutoff was validated on different model families (sentence-MiniLM embeddings at n=300 trials). Behavior on the experiment model's trajectories may have different stagnation dynamics than the validation set.
 
 ## What this does and does not prove
 
 **Does:**
 - The harness runs end-to-end with `CodeActAgent` + `OperonStagnationCritic` on real SWE-bench instances, from inference through patch-evaluation.
 - The structural critic exhibits a measurably different rejection pattern from the default LLM critic (60% of instances vs 0%).
-- Per-retry-round overhead: **$0.47** per completed retry round (= total cost delta / total_completed_retry_rounds; aborted retries excluded to avoid bias from undercounted spend). Full-slice overhead: **+56%**.
+- Per-retry-round overhead: **$0.48** per completed retry round (= total cost delta / total_completed_retry_rounds; aborted retries excluded to avoid bias from undercounted spend). Full-slice overhead: **+136%**.
 - Surface 0 on-disk certificate record(s) via the ``[CERT-FIRE]`` stdout log parsed from ``logs/instance_<iid>.output.log`` (see caveat 2).
 
 **Does not:**

@@ -71,6 +71,41 @@ def _load_jsonl(p: Path) -> list[dict]:
     return [json.loads(line) for line in p.open()]
 
 
+def _load_all_attempt_rows(run_dir: Path) -> list[dict]:
+    """Load rows spanning every critic attempt, scoped to successful instances.
+
+    The benchmarks runner's ``output.jsonl`` writes differ across
+    versions: some keep every ``(instance_id, attempt)`` row, others
+    consolidate to one row per instance at run-end. When consolidated,
+    the cross-attempt cumulative cost/tokens are lost if we only read
+    ``output.jsonl``.
+
+    Per-attempt rows are preserved in ``output.critic_attempt_<N>.jsonl``
+    files. This helper unions those files but filters to instances
+    present in ``output.jsonl`` — the critic_attempt files may include
+    instances that errored out of the final set (e.g. Docker build
+    failures), and including them would expand the scope beyond the
+    successful slice.
+
+    If no ``critic_attempt_*`` files exist, falls back to ``output.jsonl``
+    (older runs had multi-attempt rows there directly).
+    """
+    output_jsonl = _find_output_jsonl(run_dir)
+    parent = output_jsonl.parent
+    attempt_files = sorted(parent.glob("output.critic_attempt_*.jsonl"))
+    if not attempt_files:
+        return _load_jsonl(output_jsonl)
+    # Scope = successful instance set from output.jsonl.
+    scope_ids = {r["instance_id"] for r in _load_jsonl(output_jsonl)}
+    rows: list[dict] = []
+    for f in attempt_files:
+        for line in f.open():
+            r = json.loads(line)
+            if r.get("instance_id") in scope_ids:
+                rows.append(r)
+    return rows
+
+
 def _by_instance(rows: list[dict]) -> dict[str, list[dict]]:
     by = defaultdict(list)
     for r in rows:
@@ -1023,8 +1058,11 @@ def main() -> None:
             "supplied together (or neither)."
         )
 
-    baseline_rows = _load_jsonl(_find_output_jsonl(args.baseline))
-    treatment_rows = _load_jsonl(_find_output_jsonl(args.treatment))
+    # Load cross-attempt rows so cumulative cost/tokens are correct
+    # even when the runner consolidates ``output.jsonl`` to max-attempt
+    # rows. See ``_load_all_attempt_rows`` docstring.
+    baseline_rows = _load_all_attempt_rows(args.baseline)
+    treatment_rows = _load_all_attempt_rows(args.treatment)
 
     baseline_eval_report = (
         _load_eval_report(args.baseline_eval_report) if args.baseline_eval_report else None
