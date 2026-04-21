@@ -102,7 +102,19 @@ def _load_all_attempt_rows(run_dir: Path) -> list[dict]:
     """
     output_jsonl = _find_output_jsonl(run_dir)
     parent = output_jsonl.parent
-    attempt_files = sorted(parent.glob("output.critic_attempt_*.jsonl"))
+
+    # Sort by the numeric suffix, not the raw path. Lexicographic sort
+    # ranks ``critic_attempt_10.jsonl`` before ``critic_attempt_2.jsonl``,
+    # which would make "last-seen wins" dedup pick the wrong row once
+    # a run reaches double-digit retries (roborev #852).
+    def _attempt_num(p: Path) -> int:
+        stem = p.stem  # e.g. "output.critic_attempt_10"
+        return int(stem.rsplit("_", 1)[-1])
+
+    attempt_files = sorted(
+        parent.glob("output.critic_attempt_*.jsonl"),
+        key=_attempt_num,
+    )
     if not attempt_files:
         return _load_jsonl(output_jsonl)
 
@@ -110,9 +122,10 @@ def _load_all_attempt_rows(run_dir: Path) -> list[dict]:
     scope_ids = {r["instance_id"] for r in scope_rows}
     scope_max_attempt: dict[str, int] = {r["instance_id"]: r.get("attempt", 1) for r in scope_rows}
 
-    # Keyed dedup — last row wins per (instance_id, attempt). File order
-    # is lexicographic on ``critic_attempt_<N>.jsonl``, so later N
-    # supersedes earlier N if duplicates exist.
+    # Keyed dedup — last row wins per (instance_id, attempt). Files are
+    # iterated in numeric-N order (see ``attempt_files`` sort above), so
+    # a duplicate in a higher-N file supersedes the same key in a
+    # lower-N file.
     by_key: dict[tuple[str, int], dict] = {}
     for f in attempt_files:
         for line in f.open():

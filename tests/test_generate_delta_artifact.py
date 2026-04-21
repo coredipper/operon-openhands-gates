@@ -782,6 +782,35 @@ def test_load_all_attempt_rows_rejects_max_attempt_mismatch(tmp_path: Path) -> N
         gen._load_all_attempt_rows(run_dir)
 
 
+def test_load_all_attempt_rows_sorts_files_by_numeric_suffix(tmp_path: Path) -> None:
+    """Roborev #852: lexicographic sort puts ``critic_attempt_10.jsonl``
+    before ``critic_attempt_2.jsonl``, breaking "last-seen wins" dedup
+    at double-digit retries. Sort by numeric suffix so attempt=10
+    supersedes attempt=2 on a ``(instance_id, attempt)`` collision.
+    """
+    output_rows = [_row("a", attempt=10)]  # output.jsonl says max_attempt=10
+    # Build attempt files 1..10. Put duplicate (a, 2) rows in both
+    # critic_attempt_2 and critic_attempt_10 with different costs.
+    # Correct dedup (numeric sort) keeps attempt_10's copy; buggy
+    # lexicographic sort would keep attempt_2's.
+    critic: dict[int, list[dict]] = {
+        n: [_row("a", attempt=n, cost=float(n) / 100)] for n in range(1, 11)
+    }
+    # Inject a (a, attempt=2) duplicate in critic_attempt_10 with a
+    # distinctive cost so we can tell which source won the dedup.
+    critic[10].append({**_row("a", attempt=2, cost=99.99)})
+    run_dir = _write_run_dir(tmp_path, output_rows, critic)
+
+    rows = gen._load_all_attempt_rows(run_dir)
+    # One row per (a, N) for N in 1..10 == 10 rows total, with the
+    # (a, 2) collision resolved in favor of attempt_10's file.
+    assert len(rows) == 10
+    # The attempt=2 row must carry cost=99.99 (attempt_10's duplicate),
+    # not 0.02 (attempt_2's original), which proves numeric sort won.
+    att_2_row = next(r for r in rows if r.get("attempt") == 2)
+    assert (att_2_row.get("metrics") or {}).get("accumulated_cost") == 99.99
+
+
 def test_load_all_attempt_rows_rejects_instance_missing_from_union(tmp_path: Path) -> None:
     """output.jsonl has instance 'b' but no critic_attempt file contains
     it. Fail rather than report a spuriously zero cost for 'b'.
