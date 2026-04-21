@@ -15,6 +15,6 @@ Backed by Paper 4 §4.3 (0.960 real-embed convergence accuracy).
 
 from .stagnation_critic import OperonStagnationCritic
 
-__version__ = "0.1.0a1"
+__version__ = "0.1.0a3"
 
 __all__ = ["OperonStagnationCritic", "__version__"]
