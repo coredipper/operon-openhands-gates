@@ -71,6 +71,109 @@ def _load_jsonl(p: Path) -> list[dict]:
     return [json.loads(line) for line in p.open()]
 
 
+def _load_all_attempt_rows(run_dir: Path) -> list[dict]:
+    """Load rows spanning every critic attempt, scoped + validated against output.jsonl.
+
+    The benchmarks runner's ``output.jsonl`` writes differ across
+    versions: some keep every ``(instance_id, attempt)`` row, others
+    consolidate to one row per instance at run-end. When consolidated,
+    the cross-attempt cumulative cost/tokens are lost if we only read
+    ``output.jsonl``.
+
+    Per-attempt rows are preserved in ``output.critic_attempt_<N>.jsonl``
+    files. This helper unions those files, scopes to instances
+    present in ``output.jsonl``, then validates the union:
+
+    - **Dedup on ``(instance_id, attempt)``** (roborev #851 Medium):
+      a reused output dir or a rerun of the same critic attempt could
+      append fresh rows without overwriting the old ones, silently
+      double-counting cost/tokens. Keep the last-seen row for each
+      ``(instance_id, attempt)`` pair.
+    - **Consistency check against output.jsonl**: every
+      ``instance_id`` in ``output.jsonl`` must have at least one row
+      in the attempt-file union, and the max ``attempt`` found in the
+      union must equal the ``attempt`` value on the corresponding
+      ``output.jsonl`` row. A mismatch (stale output.jsonl, missing
+      attempt_N file, or a partially-regenerated rerun) raises
+      rather than producing an artifact with silently-skewed totals.
+
+    If no ``critic_attempt_*`` files exist, falls back to ``output.jsonl``
+    (older runs had multi-attempt rows there directly).
+    """
+    output_jsonl = _find_output_jsonl(run_dir)
+    parent = output_jsonl.parent
+
+    # Sort by the numeric suffix, not the raw path. Lexicographic sort
+    # ranks ``critic_attempt_10.jsonl`` before ``critic_attempt_2.jsonl``,
+    # which would make "last-seen wins" dedup pick the wrong row once
+    # a run reaches double-digit retries (roborev #852).
+    def _attempt_num(p: Path) -> int:
+        stem = p.stem  # e.g. "output.critic_attempt_10"
+        return int(stem.rsplit("_", 1)[-1])
+
+    attempt_files = sorted(
+        parent.glob("output.critic_attempt_*.jsonl"),
+        key=_attempt_num,
+    )
+    if not attempt_files:
+        return _load_jsonl(output_jsonl)
+
+    scope_rows = _load_jsonl(output_jsonl)
+    scope_ids = {r["instance_id"] for r in scope_rows}
+    scope_max_attempt: dict[str, int] = {r["instance_id"]: r.get("attempt", 1) for r in scope_rows}
+
+    # Keyed dedup — last row wins per (instance_id, attempt). Files are
+    # iterated in numeric-N order (see ``attempt_files`` sort above), so
+    # a duplicate in a higher-N file supersedes the same key in a
+    # lower-N file.
+    by_key: dict[tuple[str, int], dict] = {}
+    for f in attempt_files:
+        for line in f.open():
+            r = json.loads(line)
+            iid = r.get("instance_id")
+            if iid not in scope_ids:
+                continue
+            key = (iid, r.get("attempt", 1))
+            by_key[key] = r
+
+    # Consistency check: for every instance in scope, the max attempt
+    # in the union must match the attempt on the output.jsonl row.
+    union_max_attempt: dict[str, int] = {}
+    for (iid, attempt), _row in by_key.items():
+        union_max_attempt[iid] = max(union_max_attempt.get(iid, 0), attempt)
+    mismatches = []
+    missing_in_union = []
+    for iid, scope_att in scope_max_attempt.items():
+        if iid not in union_max_attempt:
+            missing_in_union.append(iid)
+            continue
+        if union_max_attempt[iid] != scope_att:
+            mismatches.append(
+                f"    {iid}: output.jsonl has attempt={scope_att}, "
+                f"critic_attempt_* union max attempt={union_max_attempt[iid]}"
+            )
+    if missing_in_union or mismatches:
+        lines = [
+            f"attempt-file union is inconsistent with output.jsonl in {run_dir!s}:",
+        ]
+        if missing_in_union:
+            lines.append(
+                "  instances in output.jsonl but absent from all critic_attempt_*.jsonl: "
+                + ", ".join(missing_in_union)
+            )
+        if mismatches:
+            lines.append("  max-attempt mismatches:")
+            lines.extend(mismatches)
+        lines.append(
+            "  Likely cause: output dir was reused for a rerun, or a "
+            "critic_attempt file was partially regenerated. Delete the "
+            "run dir and regenerate, or point at a clean run."
+        )
+        raise ValueError("\n".join(lines))
+
+    return list(by_key.values())
+
+
 def _by_instance(rows: list[dict]) -> dict[str, list[dict]]:
     by = defaultdict(list)
     for r in rows:
@@ -1023,8 +1126,11 @@ def main() -> None:
             "supplied together (or neither)."
         )
 
-    baseline_rows = _load_jsonl(_find_output_jsonl(args.baseline))
-    treatment_rows = _load_jsonl(_find_output_jsonl(args.treatment))
+    # Load cross-attempt rows so cumulative cost/tokens are correct
+    # even when the runner consolidates ``output.jsonl`` to max-attempt
+    # rows. See ``_load_all_attempt_rows`` docstring.
+    baseline_rows = _load_all_attempt_rows(args.baseline)
+    treatment_rows = _load_all_attempt_rows(args.treatment)
 
     baseline_eval_report = (
         _load_eval_report(args.baseline_eval_report) if args.baseline_eval_report else None
