@@ -30,6 +30,8 @@ framework-portability claim in code.
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -41,6 +43,8 @@ from operon_ai.health.epiplexity import EpiplexityMonitor
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from .embedders import NGramEmbedder
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from openhands.sdk.event.base import LLMConvertibleEvent
@@ -179,6 +183,36 @@ class OperonStagnationCritic(CriticBase):
                 window_severity_means=window_severity_means,
                 threshold=1.0 - self.threshold,
                 detection_index=len(self._severities),
+            )
+            # Side-channel log so downstream consumers can find on-disk
+            # evidence of the certificate emission. The openhands-sdk
+            # currently does NOT serialize ``CriticResult.metadata``
+            # into ``MessageEvent`` / ``ActionEvent`` records, so the
+            # retry-count proxy was the only available signal before
+            # this. With the line below, the critic's stdout carries a
+            # stable ``[CERT-FIRE] {json}`` marker that the benchmarks
+            # runner captures into ``logs/instance_<iid>.output.log``;
+            # ``scripts/generate_delta_artifact.py`` parses those logs
+            # to populate ``certificate_emitted`` / ``certificate_theorem``
+            # / ``cert_evidence_n`` in the delta artifact.
+            #
+            # Fires exactly once per critic instance per conversation
+            # (same transition guard as the cert emission itself), so
+            # the log doesn't accumulate duplicates under sustained
+            # stagnation.
+            logger.info(
+                "[CERT-FIRE] %s",
+                json.dumps(
+                    {
+                        "theorem": self._certificate.theorem,
+                        "source": self._certificate.source,
+                        "cert_evidence_n": len(window_severity_means),
+                        "epiplexic_integral": integral,
+                        "severity": severity,
+                        "detection_index": len(self._severities),
+                    },
+                    separators=(",", ":"),
+                ),
             )
         self._is_stagnant = should_be_stagnant
 

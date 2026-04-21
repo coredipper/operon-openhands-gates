@@ -457,6 +457,75 @@ def test_emission_failure_leaves_state_retryable(monkeypatch: pytest.MonkeyPatch
     assert critic.certificate is not None
 
 
+def test_cert_fire_emits_stdout_log_once_on_transition(caplog: pytest.LogCaptureFixture) -> None:
+    """Closing the 'cert metadata not serialized' caveat.
+
+    ``OperonStagnationCritic.evaluate()`` emits a ``[CERT-FIRE] {json}``
+    stdout log line once per critic instance when the certificate
+    transitions from None → fired. The benchmarks runner captures the
+    container's stdout into ``logs/instance_<iid>.output.log``, where
+    ``scripts/generate_delta_artifact.py`` can parse the payload and
+    populate per-instance certificate fields directly (rather than
+    inferring critic firing from retry counts).
+
+    The JSON payload carries theorem, source, cert_evidence_n,
+    epiplexic_integral, severity, detection_index. Instance ID is NOT
+    in the payload — the critic doesn't receive it; correlation to
+    instances happens via the log filename downstream.
+    """
+    import json
+
+    critic = _make_critic()
+    with caplog.at_level("INFO", logger="operon_openhands_gates.stagnation_critic"):
+        for _ in range(6):
+            critic.evaluate([_agent_msg("same response every turn")])
+
+    cert_fire_records = [r for r in caplog.records if "[CERT-FIRE]" in r.getMessage()]
+    assert len(cert_fire_records) == 1, (
+        f"expected exactly one cert-fire line, got {len(cert_fire_records)}: "
+        f"{[r.getMessage() for r in cert_fire_records]}"
+    )
+    msg = cert_fire_records[0].getMessage()
+    prefix, _, payload_json = msg.partition("[CERT-FIRE] ")
+    payload = json.loads(payload_json)
+    assert payload["theorem"] == "behavioral_stability_windowed"
+    assert payload["source"] == "operon_openhands_gates.stagnation_critic"
+    assert payload["cert_evidence_n"] == critic.critical_duration
+    assert 0.0 <= payload["epiplexic_integral"] <= 1.0
+    assert 0.0 <= payload["severity"] <= 1.0
+    assert isinstance(payload["detection_index"], int)
+
+
+def test_cert_fire_does_not_emit_on_non_transition(caplog: pytest.LogCaptureFixture) -> None:
+    """Diverse outputs never trip the stagnation transition — no log line."""
+    critic = _make_critic()
+    with caplog.at_level("INFO", logger="operon_openhands_gates.stagnation_critic"):
+        for text in _DIVERSE_RESPONSES:
+            critic.evaluate([_agent_msg(text)])
+    assert all("[CERT-FIRE]" not in r.getMessage() for r in caplog.records)
+
+
+def test_cert_fire_does_not_re_emit_after_initial_fire(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sustained stagnation must not re-log the cert on every subsequent
+    evaluate() call. The emission guard keys on the
+    ``was_stagnant / should_be_stagnant`` transition, not the current
+    state — so once fired, no more log lines.
+    """
+    critic = _make_critic()
+    with caplog.at_level("INFO", logger="operon_openhands_gates.stagnation_critic"):
+        # Drive well past the initial transition so any re-emission bug
+        # shows as multiple log lines.
+        for _ in range(20):
+            critic.evaluate([_agent_msg("locked in answer")])
+
+    cert_fire_records = [r for r in caplog.records if "[CERT-FIRE]" in r.getMessage()]
+    assert len(cert_fire_records) == 1, (
+        f"expected exactly one cert-fire line across 20 evaluations, got {len(cert_fire_records)}"
+    )
+
+
 def test_windowed_theorem_resolves_through_upstream_registry() -> None:
     """Same-process contract: windowed theorem resolves to a callable,
     distinct from the legacy theorem's callable. Uses the public
