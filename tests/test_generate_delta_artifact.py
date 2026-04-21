@@ -616,6 +616,51 @@ def test_markdown_includes_cert_row_and_mutates_caveat_when_evidence_present() -
     assert "Certificate metadata not serialized" not in md
 
 
+def test_validate_logs_dir_rejects_missing_directory(tmp_path: Path) -> None:
+    """Roborev #848 Medium: a mistyped --*-logs-dir path must fail
+    fast, not silently produce ``certificates_emitted: 0``.
+    """
+    rows = [_row("a", attempt=1)]
+    missing = tmp_path / "nonexistent"
+    with pytest.raises(ValueError, match="logs dir does not exist"):
+        gen._validate_logs_dir_covers_rows(missing, rows, "baseline")
+
+
+def test_validate_logs_dir_rejects_empty_dir(tmp_path: Path) -> None:
+    """An existing but empty logs dir is the clearest case of a wrong
+    path (e.g. user pointed at the parent). Fail with a hint.
+    """
+    empty = tmp_path / "logs"
+    empty.mkdir()
+    rows = [_row("a", attempt=1)]
+    with pytest.raises(ValueError, match="no ``instance_"):
+        gen._validate_logs_dir_covers_rows(empty, rows, "baseline")
+
+
+def test_validate_logs_dir_rejects_missing_instance_file(tmp_path: Path) -> None:
+    """A logs dir from a different slice (wrong instance coverage)
+    must fail with the list of missing IDs.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "instance_a.output.log").write_text("")  # has "a" only
+    rows = [_row("a", attempt=1), _row("b", attempt=1)]  # needs both
+    with pytest.raises(ValueError, match="missing 1 ``instance_"):
+        gen._validate_logs_dir_covers_rows(logs, rows, "treatment")
+
+
+def test_validate_logs_dir_accepts_matching_files(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "instance_a.output.log").write_text("")
+    (logs / "instance_b.output.log").write_text("")
+    # Extra files beyond the row set are fine — only MISSING is an error.
+    (logs / "instance_c.output.log").write_text("")
+    rows = [_row("a", attempt=1), _row("b", attempt=1)]
+    # No exception.
+    gen._validate_logs_dir_covers_rows(logs, rows, "baseline")
+
+
 def test_markdown_keeps_old_caveat_when_no_cert_evidence() -> None:
     baseline = [_row("a", attempt=1)]
     treatment = [_row("a", attempt=1)]

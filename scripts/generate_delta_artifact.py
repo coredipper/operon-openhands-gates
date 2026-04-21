@@ -204,6 +204,57 @@ def _load_eval_report(path: Path) -> dict:
     return data
 
 
+def _validate_logs_dir_covers_rows(
+    logs_dir: Path,
+    rows: list[dict],
+    condition_label: str,
+) -> None:
+    """Require the logs dir to contain ``instance_<iid>.output.log`` for
+    every row's ``instance_id``.
+
+    Roborev #848 Medium. A mistyped ``--baseline-logs-dir`` /
+    ``--treatment-logs-dir`` path or a stale log directory would
+    silently return an empty cert dict, making the artifact report
+    ``certificates_emitted: 0`` without any error — symmetric to how
+    eval reports are validated. Fail fast with a list of missing
+    ``instance_<iid>.output.log`` filenames so the user can fix the
+    flag rather than the artifact.
+
+    An empty logs dir (no ``instance_*.output.log`` at all) is also
+    an error — it's the clearest case of a wrong path.
+    """
+    if not logs_dir.is_dir():
+        raise ValueError(
+            f"{condition_label} logs dir does not exist: {logs_dir!s}\n"
+            "  Expected a directory containing ``instance_<iid>.output.log`` "
+            "files (created by the benchmarks runner under "
+            "``eval/runs/<cond>/.../logs/``)."
+        )
+    row_ids = {r["instance_id"] for r in rows}
+    present_ids = {
+        p.name[len(_INSTANCE_LOG_STEM_PREFIX) : -len(_INSTANCE_LOG_SUFFIX)]
+        for p in logs_dir.glob(f"{_INSTANCE_LOG_STEM_PREFIX}*{_INSTANCE_LOG_SUFFIX}")
+    }
+    if not present_ids:
+        raise ValueError(
+            f"{condition_label} logs dir {logs_dir!s} has no "
+            f"``instance_*.output.log`` files. "
+            "Point at the directory the benchmarks runner wrote to, "
+            "not its parent."
+        )
+    missing = sorted(row_ids - present_ids)
+    if missing:
+        raise ValueError(
+            f"{condition_label} logs dir is missing {len(missing)} "
+            f"``instance_<iid>.output.log`` file(s) for the "
+            f"{condition_label} run rows: "
+            + ", ".join(missing)
+            + f"\n  Logs dir scanned: {logs_dir!s}. "
+            "The logs dir is probably from a different slice — point at "
+            "the one that matches this run's ``output.jsonl``."
+        )
+
+
 def _validate_eval_report_covers_rows(
     report: dict,
     rows: list[dict],
@@ -985,6 +1036,16 @@ def main() -> None:
     # Cert-fire logs are independently optional (no pair requirement —
     # it's perfectly fine to have one side's logs and not the other's,
     # and the markdown handles each condition's summary separately).
+    #
+    # Roborev #848 Medium: when a logs dir IS supplied, validate it
+    # against the run rows. A stale or mistyped directory would
+    # silently degrade to ``certificates_emitted: 0`` without any
+    # error — same bug class that eval-report validation catches.
+    if args.baseline_logs_dir is not None:
+        _validate_logs_dir_covers_rows(args.baseline_logs_dir, baseline_rows, "baseline")
+    if args.treatment_logs_dir is not None:
+        _validate_logs_dir_covers_rows(args.treatment_logs_dir, treatment_rows, "treatment")
+
     baseline_cert_fires = (
         _load_cert_fires_from_logs(args.baseline_logs_dir) if args.baseline_logs_dir else None
     )

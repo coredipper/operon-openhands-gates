@@ -31,7 +31,7 @@ framework-portability claim in code.
 from __future__ import annotations
 
 import json
-import logging
+import sys
 from collections.abc import Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -43,8 +43,6 @@ from operon_ai.health.epiplexity import EpiplexityMonitor
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from .embedders import NGramEmbedder
-
-logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from openhands.sdk.event.base import LLMConvertibleEvent
@@ -196,13 +194,24 @@ class OperonStagnationCritic(CriticBase):
             # to populate ``certificate_emitted`` / ``certificate_theorem``
             # / ``cert_evidence_n`` in the delta artifact.
             #
+            # Uses ``print(..., file=sys.stdout, flush=True)`` rather
+            # than ``logger.info`` on purpose (roborev #848 High): the
+            # Python stdlib ``logging`` default handler writes to
+            # stderr, but the benchmarks runner captures *stdout* into
+            # ``instance_<iid>.output.log``. An explicit ``print`` to
+            # stdout is the reliable channel regardless of the
+            # container's logging config. ``flush=True`` ensures the
+            # line is visible before the conversation event loop moves
+            # on (buffered output can arrive after the container's
+            # teardown and be truncated).
+            #
             # Fires exactly once per critic instance per conversation
             # (same transition guard as the cert emission itself), so
             # the log doesn't accumulate duplicates under sustained
             # stagnation.
-            logger.info(
-                "[CERT-FIRE] %s",
-                json.dumps(
+            print(
+                "[CERT-FIRE] "
+                + json.dumps(
                     {
                         "theorem": self._certificate.theorem,
                         "source": self._certificate.source,
@@ -213,6 +222,8 @@ class OperonStagnationCritic(CriticBase):
                     },
                     separators=(",", ":"),
                 ),
+                file=sys.stdout,
+                flush=True,
             )
         self._is_stagnant = should_be_stagnant
 
